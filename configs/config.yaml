@@ -158,7 +158,7 @@ training:
   # Early stopping
   early_stopping:
     patience: 15
-    monitor: val_f1
+    monitor: val/f1
     mode: max
 
 # Domain adaptation
