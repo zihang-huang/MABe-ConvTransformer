@@ -1,0 +1,176 @@
+# MABe-2.0 Behavior Recognition Configuration
+
+# Paths
+paths:
+  data_dir: ${oc.env:MABE_DATA_DIR,./data}
+  train_tracking: ${paths.data_dir}/train_tracking
+  train_annotation: ${paths.data_dir}/train_annotation
+  test_tracking: ${paths.data_dir}/test_tracking
+  train_csv: ${paths.data_dir}/train.csv
+  test_csv: ${paths.data_dir}/test.csv
+  output_dir: ./outputs
+  checkpoint_dir: ${paths.output_dir}/checkpoints
+
+# Data settings
+data:
+  target_fps: 30
+  window_size: 512  # frames per sample
+  stride: 256  # sliding window stride
+  min_segment_duration: 5  # minimum frames for valid segment
+
+  # Body parts (common across labs)
+  core_body_parts:
+    - nose
+    - neck
+    - body_center
+    - tail_base
+
+  all_body_parts:
+    - ear_left
+    - ear_right
+    - nose
+    - neck
+    - body_center
+    - lateral_left
+    - lateral_right
+    - hip_left
+    - hip_right
+    - tail_base
+    - tail_tip
+
+# Behaviors
+behaviors:
+  self:
+    - biteobject
+    - climb
+    - dig
+    - exploreobject
+    - freeze
+    - genitalgroom
+    - huddle
+    - rear
+    - rest
+    - run
+    - selfgroom
+
+  pair:
+    - allogroom
+    - approach
+    - attack
+    - attemptmount
+    - avoid
+    - chase
+    - chaseattack
+    - defend
+    - disengage
+    - dominance
+    - dominancegroom
+    - dominancemount
+    - ejaculate
+    - escape
+    - flinch
+    - follow
+    - intromit
+    - mount
+    - reciprocalsniff
+    - shepherd
+    - sniff
+    - sniffbody
+    - sniffface
+    - sniffgenital
+    - submit
+    - tussle
+
+# Feature settings
+features:
+  # Temporal windows for rolling statistics
+  temporal_windows: [5, 15, 30, 60]  # frames
+
+  # Single mouse features
+  single_mouse:
+    position: true
+    velocity: true
+    acceleration: true
+    orientation: true
+    body_shape: true
+
+  # Pair features
+  pair:
+    relative_position: true
+    relative_velocity: true
+    distance: true
+    facing_angle: true
+
+# Model settings
+model:
+  name: mstcn  # Options: mstcn, tcn_transformer
+
+  # Input/Output
+  input_dim: null  # Computed from features
+  num_classes: null  # Computed from behaviors
+
+  # MS-TCN++ architecture
+  mstcn:
+    num_stages: 4
+    num_layers: 10
+    num_f_maps: 64
+    kernel_size: 3
+    dropout: 0.5
+
+  # TCN + Transformer hybrid
+  tcn_transformer:
+    tcn_channels: [64, 128, 256]
+    tcn_kernel_size: 3
+    transformer_heads: 8
+    transformer_layers: 2
+    transformer_dim: 256
+    dropout: 0.3
+
+# Training settings
+training:
+  batch_size: 8
+  num_workers: 4
+  max_epochs: 100
+  learning_rate: 0.0005
+  weight_decay: 0.0001
+
+  # Learning rate scheduler
+  scheduler:
+    name: cosine
+    warmup_epochs: 5
+    min_lr: 0.00001
+
+  # Loss weights
+  loss:
+    classification_weight: 1.0
+    smoothness_weight: 0.15
+    boundary_weight: 0.0
+
+  # Class imbalance handling
+  class_weighting: effective_num  # Options: inverse, effective_num, none
+  effective_num_beta: 0.9999
+
+  # Early stopping
+  early_stopping:
+    patience: 15
+    monitor: val_f1
+    mode: max
+
+# Domain adaptation
+domain_adaptation:
+  enabled: false
+  method: batch_norm  # Options: adversarial, batch_norm, none
+  lab_specific_bn: true
+
+# Evaluation
+evaluation:
+  threshold: 0.5
+  min_duration: 5
+  smoothing_kernel: 5
+  nms_threshold: 0.3
+
+# Experiment tracking
+logging:
+  project: mabe-behavior
+  run_name: null
+  use_wandb: false
