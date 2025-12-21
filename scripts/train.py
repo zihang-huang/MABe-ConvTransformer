@@ -144,7 +144,9 @@ def main(config_path: str = None, **overrides):
         target_fps=config['data']['target_fps'],
         prefetch_factor=config['training'].get('prefetch_factor', 4),
         tracking_cache_size=config['data'].get('tracking_cache_size', 4),
-        annotation_cache_size=config['data'].get('annotation_cache_size', 8)
+        annotation_cache_size=config['data'].get('annotation_cache_size', 8),
+        use_precomputed=config['data'].get('use_precomputed', False),
+        precomputed_dir=config['data'].get('precomputed_dir')
     )
 
     # Setup data to get dimensions
@@ -219,6 +221,9 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, help='Override learning rate')
     parser.add_argument('--model', type=str, choices=['mstcn', 'tcn_transformer'],
                         help='Override model type')
+    parser.add_argument('--use_precomputed', action='store_true',
+                        help='Use precomputed shards instead of raw parquet')
+    parser.add_argument('--precomputed_dir', type=str, help='Directory with precomputed shards')
 
     args = parser.parse_args()
 
@@ -234,5 +239,9 @@ if __name__ == '__main__':
         overrides['training.learning_rate'] = args.lr
     if args.model:
         overrides['model.name'] = args.model
+    if args.use_precomputed:
+        overrides['data.use_precomputed'] = True
+    if args.precomputed_dir:
+        overrides['data.precomputed_dir'] = args.precomputed_dir
 
     main(args.config, **overrides)

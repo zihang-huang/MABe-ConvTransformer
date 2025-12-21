@@ -18,7 +18,9 @@ data:
   stride: 256  # sliding window stride
   min_segment_duration: 5  # minimum frames for valid segment
   tracking_cache_size: 2
-  annotation_cache_size: 4 
+  annotation_cache_size: 4
+  use_precomputed: true  # When true, load precomputed shards instead of raw parquet
+  precomputed_dir: ${paths.data_dir}/precomputed  # Output location for precompute script
 
   # Body parts (common across labs)
   core_body_parts:
@@ -40,7 +42,7 @@ data:
     - tail_base
     - tail_tip
 
-# Behaviors
+# Behaviors4
 behaviors:
   self:
     - biteobject
@@ -130,12 +132,12 @@ model:
 
 # Training settings
 training:
-  batch_size: 8
+  batch_size: 16
   num_workers: 8
   max_epochs: 100
   learning_rate: 0.0005
   weight_decay: 0.0001
-  prefetch_factor: 4
+  prefetch_factor: 8
 
   # Learning rate scheduler
   scheduler:

@@ -4,7 +4,9 @@ Dataset and DataModule for MABe behavior recognition.
 
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
+import json
+import random
 import numpy as np
 import pandas as pd
 from collections import defaultdict, OrderedDict
@@ -25,6 +27,34 @@ from .preprocessing import (
     MissingDataHandler,
     BodyPartMapper
 )
+
+
+def augment_tensors(
+    features: torch.Tensor,
+    labels: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Lightweight on-the-fly augmentation for precomputed tensors.
+
+    Mirrors the numpy-based augmentation in MABeDataset.
+    """
+    # Temporal jitter
+    if random.random() < 0.3:
+        shift = random.randint(-5, 5)
+        features = torch.roll(features, shifts=shift, dims=0)
+        labels = torch.roll(labels, shifts=shift, dims=0)
+
+    # Horizontal flip (negate x coordinates at even indices)
+    if random.random() < 0.5:
+        x_indices = torch.arange(0, features.shape[-1], 2, device=features.device)
+        features[:, x_indices] = -features[:, x_indices]
+
+    # Additive noise
+    if random.random() < 0.3:
+        noise = torch.randn_like(features) * 0.01
+        features = features + noise
+
+    return features, labels
 
 
 class MABeDataset(Dataset):
@@ -445,7 +475,9 @@ class MABeDataModule(pl.LightningDataModule):
         stratify_by_lab: bool = True,
         prefetch_factor: int = 4,
         tracking_cache_size: int = 4,
-        annotation_cache_size: int = 8
+        annotation_cache_size: int = 8,
+        use_precomputed: bool = False,
+        precomputed_dir: Optional[Union[str, Path]] = None
     ):
         super().__init__()
         self.data_dir = Path(data_dir)
@@ -460,17 +492,53 @@ class MABeDataModule(pl.LightningDataModule):
         self.prefetch_factor = prefetch_factor
         self.tracking_cache_size = tracking_cache_size
         self.annotation_cache_size = annotation_cache_size
+        self.use_precomputed = use_precomputed
+        self.precomputed_dir = Path(precomputed_dir) if precomputed_dir else None
 
         self.train_dataset = None
         self.val_dataset = None
         self.test_dataset = None
 
-    def setup(self, stage: Optional[str] = None):
+    def setup(
+        self,
+        stage: Optional[str] = None,
+        use_precomputed: Optional[bool] = None,
+        precomputed_dir: Optional[Union[str, Path]] = None
+    ):
         """Set up datasets for each stage."""
+        if use_precomputed is None:
+            use_precomputed = self.use_precomputed
+        else:
+            self.use_precomputed = use_precomputed
+
+        if precomputed_dir is None:
+            precomputed_dir = self.precomputed_dir
+        else:
+            self.precomputed_dir = Path(precomputed_dir)
+
         train_csv = self.data_dir / 'train.csv'
         test_csv = self.data_dir / 'test.csv'
 
         if stage == 'fit' or stage is None:
+            if use_precomputed and self.precomputed_dir:
+                pretrain_manifest = self.precomputed_dir / 'train' / 'manifest.json'
+                preval_manifest = self.precomputed_dir / 'val' / 'manifest.json'
+                if pretrain_manifest.exists() and preval_manifest.exists():
+                    print(f"[data] Using precomputed shards from {self.precomputed_dir}")
+                    self.train_dataset = PrecomputedWindowDataset(
+                        root=self.precomputed_dir,
+                        split='train',
+                        apply_augment=True
+                    )
+                    self.val_dataset = PrecomputedWindowDataset(
+                        root=self.precomputed_dir,
+                        split='val',
+                        apply_augment=False
+                    )
+                    self.behaviors = self.train_dataset.behaviors
+                    # Behaviors provided by manifest; skip raw loading.
+                    return
+
             train_df = pd.read_csv(train_csv)
 
             # Split train/val
@@ -512,6 +580,17 @@ class MABeDataModule(pl.LightningDataModule):
                 self.behaviors = self.train_dataset.behaviors
 
         if stage == 'test' or stage is None:
+            if use_precomputed and self.precomputed_dir:
+                pretest_manifest = self.precomputed_dir / 'test' / 'manifest.json'
+                if pretest_manifest.exists():
+                    print(f"[data] Using precomputed test shards from {self.precomputed_dir}")
+                    self.test_dataset = PrecomputedWindowDataset(
+                        root=self.precomputed_dir,
+                        split='test',
+                        apply_augment=False
+                    )
+                    return
+
             if test_csv.exists():
                 test_df = pd.read_csv(test_csv)
 
@@ -595,11 +674,102 @@ class MABeDataModule(pl.LightningDataModule):
 
     @property
     def num_classes(self) -> int:
-        return len(self.behaviors) if self.behaviors else 0
+        if self.behaviors:
+            return len(self.behaviors)
+        if self.train_dataset is not None and hasattr(self.train_dataset, 'num_classes'):
+            return self.train_dataset.num_classes
+        return 0
 
     @property
     def feature_dim(self) -> int:
         if self.train_dataset is not None:
+            if hasattr(self.train_dataset, 'feature_dim') and self.train_dataset.feature_dim is not None:
+                return self.train_dataset.feature_dim
             sample = self.train_dataset[0]
             return sample['features'].shape[-1]
         return None
+
+
+class PrecomputedWindowDataset(Dataset):
+    """
+    Dataset for loading precomputed windows stored as sharded torch files.
+    """
+
+    def __init__(
+        self,
+        root: Union[str, Path],
+        split: str = 'train',
+        apply_augment: bool = False
+    ):
+        super().__init__()
+        self.root = Path(root)
+        self.split = split
+        self.apply_augment = apply_augment
+
+        manifest_path = self.root / split / 'manifest.json'
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Manifest not found for split '{split}': {manifest_path}")
+
+        with open(manifest_path, 'r') as f:
+            manifest = json.load(f)
+
+        self.window_size = manifest['window_size']
+        self.feature_dim = manifest['feature_dim']
+        self.num_classes = manifest['num_classes']
+        self.behaviors = manifest.get('behaviors', [])
+        self.shards = manifest['shards']
+
+        self._cum_counts = []
+        total = 0
+        for shard in self.shards:
+            total += shard['num_samples']
+            self._cum_counts.append(total)
+
+        self._loaded_shard_idx = None
+        self._loaded_shard = None
+
+    def __len__(self) -> int:
+        return self._cum_counts[-1] if self._cum_counts else 0
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        shard_idx, local_idx = self._locate_shard(idx)
+        shard = self._load_shard(shard_idx)
+
+        features = shard['features'][local_idx].float()
+        labels = shard['labels'][local_idx].float()
+        valid_mask = shard['valid_mask'][local_idx].float()
+        metadata = shard['metadata'][local_idx]
+
+        if self.apply_augment:
+            features, labels = augment_tensors(features, labels)
+
+        return {
+            'features': features,
+            'labels': labels,
+            'valid_mask': valid_mask,
+            'video_id': metadata['video_id'],
+            'agent_id': metadata['agent_id'],
+            'target_id': metadata['target_id'],
+            'start_frame': metadata['start_frame']
+        }
+
+    def _locate_shard(self, idx: int) -> Tuple[int, int]:
+        if idx < 0 or idx >= len(self):
+            raise IndexError(idx)
+        for i, end in enumerate(self._cum_counts):
+            if idx < end:
+                start = 0 if i == 0 else self._cum_counts[i - 1]
+                return i, idx - start
+        raise IndexError(idx)
+
+    def _load_shard(self, shard_idx: int) -> Dict[str, Any]:
+        if shard_idx == self._loaded_shard_idx and self._loaded_shard is not None:
+            return self._loaded_shard
+
+        shard_info = self.shards[shard_idx]
+        shard_path = self.root / self.split / shard_info['path']
+        shard = torch.load(shard_path, map_location='cpu')
+
+        self._loaded_shard_idx = shard_idx
+        self._loaded_shard = shard
+        return shard
