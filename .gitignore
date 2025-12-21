@@ -1,0 +1,5 @@
+kaggle/
+
+.DS_Store
+
+notebooks/lightning_logs/
