@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -46,7 +46,9 @@ class MABeDataset(Dataset):
         target_fps: float = 30.0,
         normalize_coords: bool = True,
         augment: bool = False,
-        is_train: bool = True
+        is_train: bool = True,
+        tracking_cache_size: int = 4,
+        annotation_cache_size: int = 8
     ):
         """
         Args:
@@ -60,6 +62,8 @@ class MABeDataset(Dataset):
             normalize_coords: Whether to normalize coordinates
             augment: Whether to apply data augmentation
             is_train: Whether this is training data
+            tracking_cache_size: Max number of videos to keep cached for tracking data
+            annotation_cache_size: Max number of videos to cache annotations for
         """
         self.tracking_dir = Path(tracking_dir)
         self.annotation_dir = Path(annotation_dir) if annotation_dir else None
@@ -69,12 +73,18 @@ class MABeDataset(Dataset):
         self.normalize_coords = normalize_coords
         self.augment = augment
         self.is_train = is_train
+        self.tracking_cache_size = max(1, tracking_cache_size)
+        self.annotation_cache_size = max(1, annotation_cache_size)
 
         # Initialize preprocessors
         self.coord_normalizer = CoordinateNormalizer()
         self.temporal_resampler = TemporalResampler(target_fps)
         self.missing_handler = MissingDataHandler()
         self.bodypart_mapper = BodyPartMapper(use_core_only=False)
+
+        # In-memory caches to reduce parquet read overhead
+        self._tracking_cache: OrderedDict = OrderedDict()
+        self._annotation_cache: OrderedDict = OrderedDict()
 
         # Parse metadata
         self.metadata_df = metadata_df.copy()
@@ -177,6 +187,76 @@ class MABeDataset(Dataset):
             'start_frame': sample_info['start_frame']
         }
 
+    def _read_parquet(self, path: Path) -> pd.DataFrame:
+        """Read parquet using polars when available (faster) or pandas fallback."""
+        if HAS_POLARS:
+            return pls.read_parquet(path).to_pandas()
+        return pd.read_parquet(path)
+
+    def _get_cached_tracking(self, lab_id: str, video_id: str, metadata: Dict):
+        """Load and cache tracking data for a video to avoid repeated disk I/O per sample."""
+        key = (lab_id, video_id)
+        if key in self._tracking_cache:
+            self._tracking_cache.move_to_end(key)
+            return self._tracking_cache[key]
+
+        track_path = self.tracking_dir / f"{lab_id}" / f"{video_id}.parquet"
+        if not track_path.exists():
+            raise FileNotFoundError(f"Tracking file not found: {track_path}")
+
+        track_df = self._read_parquet(track_path)
+        fps = metadata.get('frames per second', metadata.get('fps', 30))
+        bodyparts = sorted(track_df['bodypart'].unique().tolist())
+
+        coords_by_mouse = {}
+        valid_by_mouse = {}
+        for mouse_id in track_df['mouse_id'].unique():
+            raw_coords = self._extract_mouse_coords(track_df, mouse_id, bodyparts)
+            mapped_coords, mapped_parts, availability = self.bodypart_mapper.map_bodyparts(raw_coords, bodyparts)
+            mapped_coords = self.bodypart_mapper.compute_derived_parts(mapped_coords, mapped_parts, availability)
+
+            if fps != self.target_fps:
+                mapped_coords = self.temporal_resampler(mapped_coords, fps)
+
+            if self.normalize_coords:
+                mapped_coords = self.coord_normalizer(mapped_coords, metadata)
+
+            mapped_coords, valid_mask = self.missing_handler.interpolate_missing(mapped_coords)
+            mapped_coords = np.nan_to_num(mapped_coords, nan=0.0)
+
+            coords_by_mouse[mouse_id] = mapped_coords.astype(np.float32)
+            valid_by_mouse[mouse_id] = valid_mask.astype(np.float32)
+
+        cache_entry = {
+            'coords_by_mouse': coords_by_mouse,
+            'valid_by_mouse': valid_by_mouse
+        }
+        self._tracking_cache[key] = cache_entry
+        if len(self._tracking_cache) > self.tracking_cache_size:
+            self._tracking_cache.popitem(last=False)
+        return cache_entry
+
+    def _get_cached_annotations(self, lab_id: str, video_id: str):
+        """Load and cache annotation parquet to reduce read overhead."""
+        if self.annotation_dir is None:
+            return None
+
+        key = (lab_id, video_id)
+        if key in self._annotation_cache:
+            self._annotation_cache.move_to_end(key)
+            return self._annotation_cache[key]
+
+        ann_path = self.annotation_dir / f"{lab_id}" / f"{video_id}.parquet"
+        if not ann_path.exists():
+            ann_df = None
+        else:
+            ann_df = self._read_parquet(ann_path)
+
+        self._annotation_cache[key] = ann_df
+        if len(self._annotation_cache) > self.annotation_cache_size:
+            self._annotation_cache.popitem(last=False)
+        return ann_df
+
     def _load_tracking(self, sample_info: Dict) -> Tuple[np.ndarray, np.ndarray]:
         """Load and preprocess tracking data for a sample."""
         lab_id = sample_info['lab_id']
@@ -186,29 +266,17 @@ class MABeDataset(Dataset):
         target_id = sample_info['target_id']
         metadata = sample_info['metadata']
 
-        track_path = self.tracking_dir / f"{lab_id}" / f"{video_id}.parquet"
-        track_df = pd.read_parquet(track_path)
+        cache_entry = self._get_cached_tracking(lab_id, video_id, metadata)
+        coords_by_mouse = cache_entry['coords_by_mouse']
+        valid_by_mouse = cache_entry['valid_by_mouse']
 
-        # Get FPS for resampling
-        fps = metadata.get('frames per second', metadata.get('fps', 30))
+        agent_coords = coords_by_mouse.get(agent_id)
+        target_coords = coords_by_mouse.get(target_id)
+        agent_valid = valid_by_mouse.get(agent_id)
+        target_valid = valid_by_mouse.get(target_id)
 
-        # Extract agent and target coordinates
-        agent_coords = self._extract_mouse_coords(track_df, agent_id)
-        target_coords = self._extract_mouse_coords(track_df, target_id)
-
-        # Resample to target FPS
-        if fps != self.target_fps:
-            agent_coords = self.temporal_resampler(agent_coords, fps)
-            target_coords = self.temporal_resampler(target_coords, fps)
-
-        # Normalize coordinates
-        if self.normalize_coords:
-            agent_coords = self.coord_normalizer(agent_coords, metadata)
-            target_coords = self.coord_normalizer(target_coords, metadata)
-
-        # Handle missing data
-        agent_coords, agent_valid = self.missing_handler.interpolate_missing(agent_coords)
-        target_coords, target_valid = self.missing_handler.interpolate_missing(target_coords)
+        if agent_coords is None or target_coords is None:
+            raise ValueError(f"Missing coordinates for agent {agent_id} or target {target_id} in {video_id}")
 
         # Extract window
         end_frame = start_frame + self.window_size
@@ -229,21 +297,29 @@ class MABeDataset(Dataset):
 
         return features.astype(np.float32), valid_mask.astype(np.float32)
 
-    def _extract_mouse_coords(self, track_df: pd.DataFrame, mouse_id: int) -> np.ndarray:
-        """Extract coordinates for a single mouse."""
+    def _extract_mouse_coords(
+        self,
+        track_df: pd.DataFrame,
+        mouse_id: int,
+        bodyparts: Optional[List[str]] = None
+    ) -> Dict[str, np.ndarray]:
+        """Extract raw coordinates for a single mouse keyed by bodypart."""
         mouse_df = track_df[track_df['mouse_id'] == mouse_id].copy()
 
         # Pivot to get bodypart columns
-        bodyparts = mouse_df['bodypart'].unique()
+        if bodyparts is None:
+            bodyparts = mouse_df['bodypart'].unique()
         n_frames = track_df['video_frame'].max() + 1
 
-        coords = np.full((n_frames, len(bodyparts), 2), np.nan, dtype=np.float32)
+        coords = {}
 
-        for i, bp in enumerate(bodyparts):
+        for bp in bodyparts:
             bp_df = mouse_df[mouse_df['bodypart'] == bp].sort_values('video_frame')
             frames = bp_df['video_frame'].values
-            coords[frames, i, 0] = bp_df['x'].values
-            coords[frames, i, 1] = bp_df['y'].values
+            part_coords = np.full((n_frames, 2), np.nan, dtype=np.float32)
+            part_coords[frames, 0] = bp_df['x'].values
+            part_coords[frames, 1] = bp_df['y'].values
+            coords[bp] = part_coords
 
         return coords
 
@@ -282,15 +358,12 @@ class MABeDataset(Dataset):
         target_id = sample_info['target_id']
         metadata = sample_info['metadata']
 
-        ann_path = self.annotation_dir / f"{lab_id}" / f"{video_id}.parquet"
-
         # Initialize labels
         labels = np.zeros((self.window_size, self.num_classes), dtype=np.float32)
 
-        if not ann_path.exists():
+        ann_df = self._get_cached_annotations(lab_id, video_id)
+        if ann_df is None:
             return labels
-
-        ann_df = pd.read_parquet(ann_path)
 
         # Filter for this agent-target pair
         pair_anns = ann_df[
@@ -369,7 +442,10 @@ class MABeDataModule(pl.LightningDataModule):
         stride: int = 256,
         target_fps: float = 30.0,
         val_split: float = 0.2,
-        stratify_by_lab: bool = True
+        stratify_by_lab: bool = True,
+        prefetch_factor: int = 4,
+        tracking_cache_size: int = 4,
+        annotation_cache_size: int = 8
     ):
         super().__init__()
         self.data_dir = Path(data_dir)
@@ -381,6 +457,9 @@ class MABeDataModule(pl.LightningDataModule):
         self.target_fps = target_fps
         self.val_split = val_split
         self.stratify_by_lab = stratify_by_lab
+        self.prefetch_factor = prefetch_factor
+        self.tracking_cache_size = tracking_cache_size
+        self.annotation_cache_size = annotation_cache_size
 
         self.train_dataset = None
         self.val_dataset = None
@@ -409,7 +488,9 @@ class MABeDataModule(pl.LightningDataModule):
                 stride=self.stride,
                 target_fps=self.target_fps,
                 augment=True,
-                is_train=True
+                is_train=True,
+                tracking_cache_size=self.tracking_cache_size,
+                annotation_cache_size=self.annotation_cache_size
             )
 
             self.val_dataset = MABeDataset(
@@ -421,7 +502,9 @@ class MABeDataModule(pl.LightningDataModule):
                 stride=self.window_size,  # No overlap for validation
                 target_fps=self.target_fps,
                 augment=False,
-                is_train=False
+                is_train=False,
+                tracking_cache_size=self.tracking_cache_size,
+                annotation_cache_size=self.annotation_cache_size
             )
 
             # Update behaviors from training data
@@ -441,7 +524,9 @@ class MABeDataModule(pl.LightningDataModule):
                     stride=self.window_size // 2,
                     target_fps=self.target_fps,
                     augment=False,
-                    is_train=False
+                    is_train=False,
+                    tracking_cache_size=self.tracking_cache_size,
+                    annotation_cache_size=self.annotation_cache_size
                 )
 
     def _stratified_split(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -479,6 +564,8 @@ class MABeDataModule(pl.LightningDataModule):
             shuffle=True,
             num_workers=self.num_workers,
             pin_memory=True,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
+            persistent_workers=self.num_workers > 0,
             drop_last=True
         )
 
@@ -488,7 +575,9 @@ class MABeDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            pin_memory=True
+            pin_memory=True,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
+            persistent_workers=self.num_workers > 0
         )
 
     def test_dataloader(self) -> DataLoader:
@@ -499,7 +588,9 @@ class MABeDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            pin_memory=True
+            pin_memory=True,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
+            persistent_workers=self.num_workers > 0
         )
 
     @property

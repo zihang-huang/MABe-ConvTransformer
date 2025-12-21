@@ -2,7 +2,7 @@
 
 # Paths
 paths:
-  data_dir: ${oc.env:MABE_DATA_DIR,./data}
+  data_dir: ./kaggle/input/MABe-mouse-behavior-detection
   train_tracking: ${paths.data_dir}/train_tracking
   train_annotation: ${paths.data_dir}/train_annotation
   test_tracking: ${paths.data_dir}/test_tracking
@@ -17,6 +17,8 @@ data:
   window_size: 512  # frames per sample
   stride: 256  # sliding window stride
   min_segment_duration: 5  # minimum frames for valid segment
+  tracking_cache_size: 2
+  annotation_cache_size: 4 
 
   # Body parts (common across labs)
   core_body_parts:
@@ -129,10 +131,11 @@ model:
 # Training settings
 training:
   batch_size: 8
-  num_workers: 4
+  num_workers: 8
   max_epochs: 100
   learning_rate: 0.0005
   weight_decay: 0.0001
+  prefetch_factor: 4
 
   # Learning rate scheduler
   scheduler:

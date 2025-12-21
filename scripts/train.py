@@ -30,6 +30,26 @@ import torch
 from src.data.dataset import MABeDataModule
 from src.models.lightning_module import BehaviorRecognitionModule, compute_class_weights
 
+# Use Tensor Cores on supported GPUs; trades some precision for speed.
+torch.set_float32_matmul_precision("high")
+
+
+class TrainingHeartbeat(pl.Callback):
+    """Print periodic progress so long data passes don't look stalled."""
+
+    def __init__(self, log_every_n_steps: int = 100):
+        super().__init__()
+        self.log_every_n_steps = max(1, log_every_n_steps)
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        if trainer.is_global_zero:
+            print(f"Epoch {trainer.current_epoch + 1}/{trainer.max_epochs} starting...")
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        step = trainer.global_step + 1
+        if trainer.is_global_zero and step % self.log_every_n_steps == 0:
+            print(f"[progress] global step {step} (epoch {trainer.current_epoch + 1})", flush=True)
+
 
 def load_config(config_path: str) -> dict:
     """Load configuration from YAML file."""
@@ -68,6 +88,9 @@ def setup_callbacks(config: dict) -> list:
 
     # Progress bar
     callbacks.append(RichProgressBar())
+    callbacks.append(TrainingHeartbeat(
+        log_every_n_steps=config['training'].get('progress_heartbeat_steps', 100)
+    ))
 
     return callbacks
 
@@ -118,7 +141,10 @@ def main(config_path: str = None, **overrides):
         num_workers=config['training']['num_workers'],
         window_size=config['data']['window_size'],
         stride=config['data']['stride'],
-        target_fps=config['data']['target_fps']
+        target_fps=config['data']['target_fps'],
+        prefetch_factor=config['training'].get('prefetch_factor', 4),
+        tracking_cache_size=config['data'].get('tracking_cache_size', 4),
+        annotation_cache_size=config['data'].get('annotation_cache_size', 8)
     )
 
     # Setup data to get dimensions
@@ -164,7 +190,8 @@ def main(config_path: str = None, **overrides):
         accumulate_grad_batches=1,
         precision='16-mixed' if torch.cuda.is_available() else 32,
         log_every_n_steps=10,
-        val_check_interval=1.0
+        val_check_interval=1.0,
+        benchmark=True
     )
 
     # Train
