@@ -37,6 +37,7 @@ class BehaviorRecognitionModule(pl.LightningModule):
         max_epochs: int = 100,
         smoothing_weight: float = 0.15,
         class_weights: Optional[torch.Tensor] = None,
+        eval_threshold: float = 0.5,
         # MS-TCN specific
         num_stages: int = 4,
         num_layers: int = 10,
@@ -60,6 +61,7 @@ class BehaviorRecognitionModule(pl.LightningModule):
         self.weight_decay = weight_decay
         self.warmup_epochs = warmup_epochs
         self.max_epochs = max_epochs
+        self.eval_threshold = eval_threshold
 
         # Build model
         if model_name == 'mstcn':
@@ -227,33 +229,50 @@ class BehaviorRecognitionModule(pl.LightningModule):
         probs = torch.sigmoid(predictions)
 
         # Binary predictions
-        preds = (probs > 0.5).float()
+        preds = (probs > self.eval_threshold).float()
 
+        mask_factor = None
         if mask is not None:
             mask = mask.unsqueeze(-1).expand_as(preds)
             preds = preds * mask
             labels = labels * mask
-            n_valid = mask.sum()
+            mask_factor = mask
+            n_valid = mask.sum().clamp_min(1e-8)
         else:
-            n_valid = preds.numel()
+            n_valid = torch.tensor(preds.numel(), device=preds.device, dtype=preds.dtype)
 
         # Accuracy
         correct = (preds == labels).float()
-        accuracy = correct.sum() / (n_valid + 1e-8)
+        if mask_factor is not None:
+            correct = correct * mask_factor
+        accuracy = correct.sum() / n_valid
 
         # Per-class metrics
-        tp = (preds * labels).sum(dim=(0, 1))
-        fp = (preds * (1 - labels)).sum(dim=(0, 1))
-        fn = ((1 - preds) * labels).sum(dim=(0, 1))
+        if mask_factor is None:
+            tp = (preds * labels).sum(dim=(0, 1))
+            fp = (preds * (1 - labels)).sum(dim=(0, 1))
+            fn = ((1 - preds) * labels).sum(dim=(0, 1))
+            label_support = labels.sum(dim=(0, 1))
+        else:
+            tp = (preds * labels * mask_factor).sum(dim=(0, 1))
+            fp = (preds * (1 - labels) * mask_factor).sum(dim=(0, 1))
+            fn = ((1 - preds) * labels * mask_factor).sum(dim=(0, 1))
+            label_support = (labels * mask_factor).sum(dim=(0, 1))
 
         precision = tp / (tp + fp + 1e-8)
         recall = tp / (tp + fn + 1e-8)
         f1 = 2 * precision * recall / (precision + recall + 1e-8)
 
-        # Macro averages
-        macro_precision = precision.mean()
-        macro_recall = recall.mean()
-        macro_f1 = f1.mean()
+        # Macro averages; ignore classes with no positives to avoid diluting with absent classes
+        present_mask = label_support > 0
+        if present_mask.any():
+            macro_precision = precision[present_mask].mean()
+            macro_recall = recall[present_mask].mean()
+            macro_f1 = f1[present_mask].mean()
+        else:
+            macro_precision = precision.mean()
+            macro_recall = recall.mean()
+            macro_f1 = f1.mean()
 
         return {
             'accuracy': accuracy.item(),
@@ -362,27 +381,38 @@ class GradientReversalFunction(torch.autograd.Function):
 def compute_class_weights(
     labels: np.ndarray,
     method: str = 'effective_num',
-    beta: float = 0.9999
+    beta: float = 0.9999,
+    is_counts: bool = False
 ) -> torch.Tensor:
     """
     Compute class weights for imbalanced data.
 
     Args:
-        labels: Array of label counts per class
+        labels: Array of labels or precomputed class counts
         method: 'inverse', 'effective_num', or 'sqrt_inverse'
         beta: Beta parameter for effective number weighting
+        is_counts: Treat `labels` as already-aggregated class counts when True
 
     Returns:
         Class weight tensor
     """
     if isinstance(labels, torch.Tensor):
-        labels = labels.numpy()
+        labels = labels.detach().cpu().numpy()
+
+    label_array = np.asarray(labels)
 
     # Count samples per class
-    if labels.ndim > 1:
-        class_counts = labels.sum(axis=0)
+    if is_counts:
+        class_counts = label_array.astype(np.float64)
+    elif label_array.ndim > 1:
+        class_counts = label_array.sum(axis=0)
+    elif np.issubdtype(label_array.dtype, np.integer):
+        class_counts = np.bincount(label_array.astype(np.int64))
     else:
-        class_counts = np.bincount(labels)
+        class_counts = label_array.astype(np.float64)
+
+    class_counts = np.asarray(class_counts, dtype=np.float64)
+    class_counts[class_counts < 1e-6] = 1e-6
 
     if method == 'inverse':
         weights = 1.0 / (class_counts + 1)
@@ -396,6 +426,6 @@ def compute_class_weights(
         weights = np.ones_like(class_counts, dtype=np.float32)
 
     # Normalize
-    weights = weights / weights.sum() * len(weights)
+    weights = weights / (weights.mean() + 1e-8)
 
     return torch.tensor(weights, dtype=torch.float32)

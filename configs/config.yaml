@@ -169,7 +169,7 @@ domain_adaptation:
 
 # Evaluation
 evaluation:
-  threshold: 0.5
+  threshold: 0.39
   min_duration: 5
   smoothing_kernel: 5
   nms_threshold: 0.3

@@ -433,6 +433,7 @@ class TCNTransformerLoss(nn.Module):
         self.multi_label = multi_label
 
         if class_weights is not None:
+            class_weights = class_weights.float()
             self.register_buffer('class_weights', class_weights)
         else:
             self.class_weights = None
@@ -460,12 +461,12 @@ class TCNTransformerLoss(nn.Module):
         # Classification loss
         if self.multi_label or targets.dim() == 3:
             # Binary cross entropy for multi-label
+            pos_weight = self.class_weights if self.class_weights is not None else None
             cls_loss = F.binary_cross_entropy_with_logits(
                 predictions, targets.float(),
-                reduction='none'
+                reduction='none',
+                pos_weight=pos_weight
             )
-            if self.class_weights is not None:
-                cls_loss = cls_loss * self.class_weights
             cls_loss = cls_loss.mean(dim=-1)
         else:
             # Cross entropy for single-label

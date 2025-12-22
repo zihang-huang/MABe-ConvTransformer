@@ -403,6 +403,7 @@ class MSTCNLoss(nn.Module):
         self.focal_gamma = focal_gamma
 
         if class_weights is not None:
+            class_weights = class_weights.float()
             self.register_buffer('class_weights', class_weights)
         else:
             self.class_weights = None
@@ -481,11 +482,10 @@ class MSTCNLoss(nn.Module):
         # Handle multi-label targets
         if targets.dim() == 3:  # (batch, seq_len, num_classes)
             # Binary cross entropy for multi-label
+            pos_weight = self.class_weights if self.class_weights is not None else None
             loss = F.binary_cross_entropy_with_logits(
-                predictions, targets, reduction='none'
+                predictions, targets, reduction='none', pos_weight=pos_weight
             )
-            if self.class_weights is not None:
-                loss = loss * self.class_weights
             loss = loss.mean(dim=-1)  # Average over classes
         else:  # (batch, seq_len)
             # Cross entropy for single-label

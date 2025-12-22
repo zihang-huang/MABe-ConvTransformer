@@ -3,3 +3,7 @@ kaggle/
 .DS_Store
 
 notebooks/lightning_logs/
+
+*.pt
+
+__pycache__/

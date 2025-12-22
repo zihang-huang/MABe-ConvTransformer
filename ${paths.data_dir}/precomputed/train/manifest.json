@@ -1,0 +1,439 @@
+{
+  "split": "train",
+  "window_size": 512,
+  "feature_dim": 44,
+  "num_classes": 37,
+  "behaviors": [
+    "biteobject",
+    "climb",
+    "dig",
+    "exploreobject",
+    "freeze",
+    "genitalgroom",
+    "huddle",
+    "rear",
+    "rest",
+    "run",
+    "selfgroom",
+    "allogroom",
+    "approach",
+    "attack",
+    "attemptmount",
+    "avoid",
+    "chase",
+    "chaseattack",
+    "defend",
+    "disengage",
+    "dominance",
+    "dominancegroom",
+    "dominancemount",
+    "ejaculate",
+    "escape",
+    "flinch",
+    "follow",
+    "intromit",
+    "mount",
+    "reciprocalsniff",
+    "shepherd",
+    "sniff",
+    "sniffbody",
+    "sniffface",
+    "sniffgenital",
+    "submit",
+    "tussle"
+  ],
+  "shards": [
+    {
+      "path": "shard_00000.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00001.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00002.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00003.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00004.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00005.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00006.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00007.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00008.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00009.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00010.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00011.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00012.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00013.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00014.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00015.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00016.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00017.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00018.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00019.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00020.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00021.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00022.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00023.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00024.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00025.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00026.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00027.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00028.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00029.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00030.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00031.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00032.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00033.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00034.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00035.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00036.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00037.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00038.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00039.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00040.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00041.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00042.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00043.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00044.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00045.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00046.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00047.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00048.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00049.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00050.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00051.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00052.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00053.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00054.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00055.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00056.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00057.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00058.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00059.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00060.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00061.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00062.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00063.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00064.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00065.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00066.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00067.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00068.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00069.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00070.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00071.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00072.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00073.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00074.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00075.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00076.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00077.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00078.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00079.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00080.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00081.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00082.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00083.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00084.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00085.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00086.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00087.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00088.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00089.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00090.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00091.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00092.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00093.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00094.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00095.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00096.pt",
+      "num_samples": 512
+    },
+    {
+      "path": "shard_00097.pt",
+      "num_samples": 438
+    }
+  ]
+}

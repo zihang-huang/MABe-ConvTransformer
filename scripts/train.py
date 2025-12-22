@@ -10,6 +10,7 @@ Usage:
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -26,6 +27,8 @@ from pytorch_lightning.callbacks import (
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 import yaml
 import torch
+import pandas as pd
+import numpy as np
 
 from src.data.dataset import MABeDataModule
 from src.models.lightning_module import BehaviorRecognitionModule, compute_class_weights
@@ -56,6 +59,82 @@ def load_config(config_path: str) -> dict:
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     return config
+
+
+def collect_class_counts_from_annotations(dataset, target_fps: float) -> Optional[np.ndarray]:
+    """
+    Approximate per-class frame counts directly from annotation parquet files.
+    This keeps weighting logic lightweight while avoiding a full dataset pass.
+    """
+    if not hasattr(dataset, "metadata_df") or dataset.annotation_dir is None:
+        return None
+
+    counts = np.zeros(dataset.num_classes, dtype=np.float64)
+    behavior_to_idx = dataset.behavior_to_idx
+    ann_dir = dataset.annotation_dir
+
+    for _, meta in dataset.metadata_df.iterrows():
+        ann_path = ann_dir / f"{meta['lab_id']}" / f"{meta['video_id']}.parquet"
+        if not ann_path.exists():
+            continue
+
+        ann_df = pd.read_parquet(ann_path)
+        if ann_df.empty:
+            continue
+
+        fps = dataset._get_fps(meta.to_dict()) if hasattr(dataset, "_get_fps") else target_fps
+        fps = fps if fps else target_fps
+        scale = target_fps / fps if fps > 0 else 1.0
+
+        for _, row in ann_df.iterrows():
+            idx = behavior_to_idx.get(row['action'])
+            if idx is None:
+                continue
+            start = int(row['start_frame'] * scale)
+            stop = int(row['stop_frame'] * scale)
+            if stop <= start:
+                continue
+            counts[idx] += max(1, stop - start)
+
+    return counts
+
+
+def collect_class_counts_from_precomputed(dataset) -> Optional[np.ndarray]:
+    """
+    Sum label activations across precomputed shards to estimate class frequency.
+    """
+    if not hasattr(dataset, "shards"):
+        return None
+
+    counts = torch.zeros(dataset.num_classes, dtype=torch.float64)
+    split_root = dataset.root / dataset.split
+
+    for shard_info in dataset.shards:
+        shard_path = split_root / shard_info['path']
+        shard = torch.load(shard_path, map_location='cpu')
+        counts += shard['labels'].sum(dim=(0, 1)).double()
+
+    return counts.numpy()
+
+
+def build_class_weights(train_dataset, target_fps: float, weighting: str, beta: float):
+    """
+    Build class weights using the configured strategy.
+    """
+    if weighting == 'none' or train_dataset is None:
+        return None
+
+    counts = collect_class_counts_from_precomputed(train_dataset)
+    if counts is None:
+        counts = collect_class_counts_from_annotations(train_dataset, target_fps)
+
+    if counts is None or counts.sum() == 0:
+        print("[warn] Unable to compute class counts for weighting; proceeding without.")
+        return None
+
+    weights = compute_class_weights(counts, method=weighting, beta=beta, is_counts=True)
+    print(f"[info] Class weights computed (min={weights.min().item():.4f}, max={weights.max().item():.4f})")
+    return weights
 
 
 def setup_callbacks(config: dict) -> list:
@@ -153,11 +232,14 @@ def main(config_path: str = None, **overrides):
     data_module.setup('fit')
 
     # Compute class weights if needed
-    class_weights = None
-    if config['training'].get('class_weighting', 'none') != 'none':
-        print("Computing class weights...")
-        # This would require iterating through the dataset
-        # For now, we'll skip this in the base implementation
+    weighting = config['training'].get('class_weighting', 'none')
+    beta = config['training'].get('effective_num_beta', 0.9999)
+    class_weights = build_class_weights(
+        data_module.train_dataset,
+        target_fps=config['data']['target_fps'],
+        weighting=weighting,
+        beta=beta
+    )
 
     # Initialize model
     print(f"Initializing {config['model']['name']} model...")
@@ -174,6 +256,7 @@ def main(config_path: str = None, **overrides):
         max_epochs=config['training']['max_epochs'],
         smoothing_weight=config['training']['loss']['smoothness_weight'],
         class_weights=class_weights,
+        eval_threshold=config.get('evaluation', {}).get('threshold', 0.5),
         **model_config
     )
 

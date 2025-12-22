@@ -29,6 +29,34 @@ from .preprocessing import (
 )
 
 
+def flatten_behaviors_config(behaviors: Optional[Union[Dict[str, List[str]], List[str]]]):
+    """
+    Convert behaviors config into a flat list of class names.
+
+    The YAML stores behaviors grouped under "self" and "pair". The datasets
+    expect a flat list, so we normalize here and also handle legacy dicts
+    loaded from manifests.
+    """
+    if behaviors is None:
+        return None
+    if isinstance(behaviors, dict):
+        flat: List[str] = []
+        for group in ("self", "pair"):
+            vals = behaviors.get(group, [])
+            if isinstance(vals, list):
+                flat.extend(vals)
+        # Pick up any other keys just in case.
+        for key, vals in behaviors.items():
+            if key in ("self", "pair"):
+                continue
+            if isinstance(vals, list):
+                flat.extend(vals)
+            else:
+                flat.append(vals)
+        return flat
+    return behaviors
+
+
 def augment_tensors(
     features: torch.Tensor,
     labels: torch.Tensor
@@ -119,12 +147,13 @@ class MABeDataset(Dataset):
         # Parse metadata
         self.metadata_df = metadata_df.copy()
         self.video_ids = metadata_df['video_id'].unique().tolist()
+        self._annotation_intervals_cache: Dict[Tuple[str, str], Dict[Tuple[int, int], List[Tuple[int, int]]]] = {}
 
         # Build behavior vocabulary
         if behaviors is None:
             self.behaviors = self._collect_behaviors()
         else:
-            self.behaviors = behaviors
+            self.behaviors = flatten_behaviors_config(behaviors)
         self.behavior_to_idx = {b: i for i, b in enumerate(self.behaviors)}
         self.idx_to_behavior = {i: b for i, b in enumerate(self.behaviors)}
         self.num_classes = len(self.behaviors)
@@ -156,7 +185,14 @@ class MABeDataset(Dataset):
         for _, row in self.metadata_df.iterrows():
             lab_id = row['lab_id']
             video_id = row['video_id']
-            fps = row.get('frames per second', row.get('fps', 30))
+            fps = self._get_fps(row)
+            ann_intervals = None
+
+            if self.annotation_dir is not None:
+                ann_intervals = self._get_annotation_intervals(lab_id, video_id, fps)
+                if not ann_intervals:
+                    # Skip videos with no annotations when labels are required.
+                    continue
 
             # Load tracking to get video length and mice
             track_path = self.tracking_dir / f"{lab_id}" / f"{video_id}.parquet"
@@ -177,6 +213,10 @@ class MABeDataset(Dataset):
                 # For each agent-target pair
                 for agent in mice:
                     for target in mice:
+                        if ann_intervals is not None:
+                            pair_intervals = ann_intervals.get((int(agent), int(target)), [])
+                            if not self._window_overlaps(start, start + self.window_size, pair_intervals):
+                                continue
                         samples.append({
                             'lab_id': lab_id,
                             'video_id': video_id,
@@ -235,7 +275,7 @@ class MABeDataset(Dataset):
             raise FileNotFoundError(f"Tracking file not found: {track_path}")
 
         track_df = self._read_parquet(track_path)
-        fps = metadata.get('frames per second', metadata.get('fps', 30))
+        fps = self._get_fps(metadata)
         bodyparts = sorted(track_df['bodypart'].unique().tolist())
 
         coords_by_mouse = {}
@@ -281,6 +321,17 @@ class MABeDataset(Dataset):
             ann_df = None
         else:
             ann_df = self._read_parquet(ann_path)
+
+            # Normalize identifier columns to integer form for reliable filtering.
+            ann_df = ann_df.copy()
+            ann_df['agent_id_int'] = ann_df['agent_id'].apply(self._normalize_id)
+            ann_df['target_id_int'] = ann_df.apply(
+                lambda r: self._normalize_id(r['target_id'], agent_fallback=r['agent_id_int']),
+                axis=1
+            )
+            ann_df['start_frame'] = ann_df['start_frame'].astype(int)
+            ann_df['stop_frame'] = ann_df['stop_frame'].astype(int)
+            ann_df = ann_df.dropna(subset=['agent_id_int', 'target_id_int'])
 
         self._annotation_cache[key] = ann_df
         if len(self._annotation_cache) > self.annotation_cache_size:
@@ -353,6 +404,46 @@ class MABeDataset(Dataset):
 
         return coords
 
+    @staticmethod
+    def _normalize_id(raw_id, agent_fallback: Optional[int] = None) -> Optional[int]:
+        """Convert agent/target id fields to integer form."""
+        if isinstance(raw_id, str):
+            lowered = raw_id.strip().lower()
+            if lowered.startswith('mouse'):
+                try:
+                    return int(''.join(filter(str.isdigit, lowered)))
+                except ValueError:
+                    return None
+            if lowered == 'self' and agent_fallback is not None:
+                return agent_fallback
+            try:
+                return int(lowered)
+            except ValueError:
+                return None
+        try:
+            return int(raw_id)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _get_fps(metadata: Dict) -> float:
+        """Robustly read fps from metadata with fallbacks."""
+        return metadata.get('frames_per_second',
+                            metadata.get('frames per second',
+                                         metadata.get('fps', 30)))
+
+    @staticmethod
+    def _window_overlaps(start: int, end: int, intervals: List[Tuple[int, int]]) -> bool:
+        """Return True if [start, end) overlaps any interval."""
+        if not intervals:
+            return False
+        for s, e in intervals:
+            if s < end and e > start:
+                return True
+            if s >= end:
+                break
+        return False
+
     def _get_window(self, data: np.ndarray, start: int, end: int) -> np.ndarray:
         """Extract a window from data, padding if necessary."""
         n_frames = data.shape[0]
@@ -379,6 +470,62 @@ class MABeDataset(Dataset):
 
         return window
 
+    def _get_annotation_intervals(
+        self,
+        lab_id: str,
+        video_id: str,
+        fps: float
+    ) -> Dict[Tuple[int, int], List[Tuple[int, int]]]:
+        """
+        Build cached annotation intervals per (agent, target) pair at target FPS.
+
+        Returns:
+            Dict mapping (agent_id, target_id) -> list of (start, end) frame tuples.
+        """
+        cache_key = (lab_id, video_id)
+        if cache_key in self._annotation_intervals_cache:
+            return self._annotation_intervals_cache[cache_key]
+
+        ann_df = self._get_cached_annotations(lab_id, video_id)
+        if ann_df is None or len(ann_df) == 0:
+            self._annotation_intervals_cache[cache_key] = {}
+            return {}
+
+        intervals: Dict[Tuple[int, int], List[Tuple[int, int]]] = defaultdict(list)
+        for _, row in ann_df.iterrows():
+            agent_id = row.get('agent_id_int')
+            target_id = row.get('target_id_int')
+            if agent_id is None or target_id is None:
+                continue
+
+            ann_start = int(row['start_frame'])
+            ann_stop = int(row['stop_frame'])
+
+            if fps != self.target_fps:
+                ann_start = int(ann_start * self.target_fps / fps)
+                ann_stop = int(ann_stop * self.target_fps / fps)
+
+            if ann_stop <= ann_start:
+                continue
+
+            intervals[(agent_id, target_id)].append((ann_start, ann_stop))
+
+        # Sort and merge overlapping intervals for efficient overlap checks
+        merged_intervals: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+        for pair, spans in intervals.items():
+            sorted_spans = sorted(spans, key=lambda x: x[0])
+            merged: List[Tuple[int, int]] = []
+            for span in sorted_spans:
+                if not merged or span[0] > merged[-1][1]:
+                    merged.append((span[0], span[1]))
+                else:
+                    last_start, last_end = merged[-1]
+                    merged[-1] = (last_start, max(last_end, span[1]))
+            merged_intervals[pair] = [(int(s), int(e)) for s, e in merged]
+
+        self._annotation_intervals_cache[cache_key] = merged_intervals
+        return merged_intervals
+
     def _load_annotations(self, sample_info: Dict) -> np.ndarray:
         """Load frame-level annotations for a sample."""
         lab_id = sample_info['lab_id']
@@ -397,13 +544,12 @@ class MABeDataset(Dataset):
 
         # Filter for this agent-target pair
         pair_anns = ann_df[
-            (ann_df['agent_id'] == f"mouse{agent_id}") &
-            ((ann_df['target_id'] == f"mouse{target_id}") |
-             (ann_df['target_id'] == 'self'))
+            (ann_df['agent_id_int'] == int(agent_id)) &
+            (ann_df['target_id_int'] == int(target_id))
         ]
 
         # Get FPS for frame mapping
-        fps = metadata.get('frames per second', metadata.get('fps', 30))
+        fps = self._get_fps(metadata)
 
         for _, row in pair_anns.iterrows():
             action = row['action']
@@ -481,7 +627,7 @@ class MABeDataModule(pl.LightningDataModule):
     ):
         super().__init__()
         self.data_dir = Path(data_dir)
-        self.behaviors = behaviors
+        self.behaviors = flatten_behaviors_config(behaviors)
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.window_size = window_size
@@ -524,20 +670,23 @@ class MABeDataModule(pl.LightningDataModule):
                 pretrain_manifest = self.precomputed_dir / 'train' / 'manifest.json'
                 preval_manifest = self.precomputed_dir / 'val' / 'manifest.json'
                 if pretrain_manifest.exists() and preval_manifest.exists():
-                    print(f"[data] Using precomputed shards from {self.precomputed_dir}")
-                    self.train_dataset = PrecomputedWindowDataset(
-                        root=self.precomputed_dir,
-                        split='train',
-                        apply_augment=True
-                    )
-                    self.val_dataset = PrecomputedWindowDataset(
-                        root=self.precomputed_dir,
-                        split='val',
-                        apply_augment=False
-                    )
-                    self.behaviors = self.train_dataset.behaviors
-                    # Behaviors provided by manifest; skip raw loading.
-                    return
+                    try:
+                        print(f"[data] Using precomputed shards from {self.precomputed_dir}")
+                        self.train_dataset = PrecomputedWindowDataset(
+                            root=self.precomputed_dir,
+                            split='train',
+                            apply_augment=True
+                        )
+                        self.val_dataset = PrecomputedWindowDataset(
+                            root=self.precomputed_dir,
+                            split='val',
+                            apply_augment=False
+                        )
+                        self.behaviors = self.train_dataset.behaviors
+                        # Behaviors provided by manifest; skip raw loading.
+                        return
+                    except ValueError as e:
+                        print(f"[data] Precomputed shards invalid: {e}. Falling back to raw data.")
 
             train_df = pd.read_csv(train_csv)
 
@@ -583,13 +732,16 @@ class MABeDataModule(pl.LightningDataModule):
             if use_precomputed and self.precomputed_dir:
                 pretest_manifest = self.precomputed_dir / 'test' / 'manifest.json'
                 if pretest_manifest.exists():
-                    print(f"[data] Using precomputed test shards from {self.precomputed_dir}")
-                    self.test_dataset = PrecomputedWindowDataset(
-                        root=self.precomputed_dir,
-                        split='test',
-                        apply_augment=False
-                    )
-                    return
+                    try:
+                        print(f"[data] Using precomputed test shards from {self.precomputed_dir}")
+                        self.test_dataset = PrecomputedWindowDataset(
+                            root=self.precomputed_dir,
+                            split='test',
+                            apply_augment=False
+                        )
+                        return
+                    except ValueError as e:
+                        print(f"[data] Precomputed test shards invalid: {e}. Falling back to raw data.")
 
             if test_csv.exists():
                 test_df = pd.read_csv(test_csv)
@@ -716,7 +868,14 @@ class PrecomputedWindowDataset(Dataset):
         self.window_size = manifest['window_size']
         self.feature_dim = manifest['feature_dim']
         self.num_classes = manifest['num_classes']
-        self.behaviors = manifest.get('behaviors', [])
+        behaviors_raw = manifest.get('behaviors', [])
+        self.behaviors = flatten_behaviors_config(behaviors_raw) or []
+        if self.behaviors and self.num_classes != len(self.behaviors):
+            raise ValueError(
+                f"Manifest {manifest_path} lists {self.num_classes} classes but "
+                f"{len(self.behaviors)} behaviors after flattening. "
+                "Regenerate precomputed shards with the fixed behavior handling."
+            )
         self.shards = manifest['shards']
 
         self._cum_counts = []
