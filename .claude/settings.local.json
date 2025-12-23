@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c:*)",
+      "Bash(.venvScriptsactivate)",
+      "Bash(.venv/Scripts/python.exe:*)",
+      "Bash(\"c:\\\\Users\\\\73506\\\\MABe-ConvTransformer\\\\.venv\\\\Scripts\\\\python.exe\" -c:*)",
+      "Bash(\"c:\\\\Users\\\\73506\\\\MABe-ConvTransformer\\\\.venv\\\\Scripts\\\\python.exe\":*)",
+      "Bash(del \"c:\\\\Users\\\\73506\\\\MABe-ConvTransformer\\\\check_labels.py\")"
+    ]
+  }
+}

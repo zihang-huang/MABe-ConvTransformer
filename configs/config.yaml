@@ -134,8 +134,8 @@ model:
 training:
   batch_size: 16
   num_workers: 8
-  max_epochs: 100
-  learning_rate: 0.0005
+  max_epochs: 1000
+  learning_rate: 0.0001  # Reduced from 0.0005 to prevent gradient explosion with class weights
   weight_decay: 0.0001
   prefetch_factor: 8
 
@@ -152,8 +152,11 @@ training:
     boundary_weight: 0.0
 
   # Class imbalance handling
-  class_weighting: effective_num  # Options: inverse, effective_num, none
+  # Use 'none' with focal loss instead - more stable than pos_weight for extreme imbalance
+  class_weighting: none  # Options: inverse, effective_num, pos_neg_ratio, none
   effective_num_beta: 0.9999
+  use_focal_loss: true  # Use focal loss to handle class imbalance without pos_weight
+  focal_gamma: 2.0  # Focus on hard examples
 
   # Early stopping
   early_stopping:

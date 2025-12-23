@@ -85,15 +85,7 @@
     },
     {
       "path": "shard_00010.pt",
-      "num_samples": 512
-    },
-    {
-      "path": "shard_00011.pt",
-      "num_samples": 512
-    },
-    {
-      "path": "shard_00012.pt",
-      "num_samples": 8
+      "num_samples": 302
     }
   ]
 }

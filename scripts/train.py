@@ -99,22 +99,25 @@ def collect_class_counts_from_annotations(dataset, target_fps: float) -> Optiona
     return counts
 
 
-def collect_class_counts_from_precomputed(dataset) -> Optional[np.ndarray]:
+def collect_class_counts_from_precomputed(dataset) -> tuple:
     """
     Sum label activations across precomputed shards to estimate class frequency.
+    Returns (counts, total_samples) tuple.
     """
     if not hasattr(dataset, "shards"):
-        return None
+        return None, 0
 
     counts = torch.zeros(dataset.num_classes, dtype=torch.float64)
+    total_samples = 0
     split_root = dataset.root / dataset.split
 
     for shard_info in dataset.shards:
         shard_path = split_root / shard_info['path']
         shard = torch.load(shard_path, map_location='cpu')
         counts += shard['labels'].sum(dim=(0, 1)).double()
+        total_samples += shard['labels'].shape[0] * shard['labels'].shape[1]
 
-    return counts.numpy()
+    return counts.numpy(), total_samples
 
 
 def build_class_weights(train_dataset, target_fps: float, weighting: str, beta: float):
@@ -124,15 +127,16 @@ def build_class_weights(train_dataset, target_fps: float, weighting: str, beta: 
     if weighting == 'none' or train_dataset is None:
         return None
 
-    counts = collect_class_counts_from_precomputed(train_dataset)
+    counts, total_samples = collect_class_counts_from_precomputed(train_dataset)
     if counts is None:
         counts = collect_class_counts_from_annotations(train_dataset, target_fps)
+        total_samples = None  # Will be estimated in compute_class_weights
 
     if counts is None or counts.sum() == 0:
         print("[warn] Unable to compute class counts for weighting; proceeding without.")
         return None
 
-    weights = compute_class_weights(counts, method=weighting, beta=beta, is_counts=True)
+    weights = compute_class_weights(counts, method=weighting, beta=beta, is_counts=True, total_samples=total_samples)
     print(f"[info] Class weights computed (min={weights.min().item():.4f}, max={weights.max().item():.4f})")
     return weights
 
@@ -257,6 +261,8 @@ def main(config_path: str = None, **overrides):
         smoothing_weight=config['training']['loss']['smoothness_weight'],
         class_weights=class_weights,
         eval_threshold=config.get('evaluation', {}).get('threshold', 0.5),
+        use_focal_loss=config['training'].get('use_focal_loss', False),
+        focal_gamma=config['training'].get('focal_gamma', 2.0),
         **model_config
     )
 

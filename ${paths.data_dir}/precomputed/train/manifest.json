@@ -405,35 +405,7 @@
     },
     {
       "path": "shard_00090.pt",
-      "num_samples": 512
-    },
-    {
-      "path": "shard_00091.pt",
-      "num_samples": 512
-    },
-    {
-      "path": "shard_00092.pt",
-      "num_samples": 512
-    },
-    {
-      "path": "shard_00093.pt",
-      "num_samples": 512
-    },
-    {
-      "path": "shard_00094.pt",
-      "num_samples": 512
-    },
-    {
-      "path": "shard_00095.pt",
-      "num_samples": 512
-    },
-    {
-      "path": "shard_00096.pt",
-      "num_samples": 512
-    },
-    {
-      "path": "shard_00097.pt",
-      "num_samples": 438
+      "num_samples": 495
     }
   ]
 }

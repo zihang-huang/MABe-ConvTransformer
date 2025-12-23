@@ -38,6 +38,8 @@ class BehaviorRecognitionModule(pl.LightningModule):
         smoothing_weight: float = 0.15,
         class_weights: Optional[torch.Tensor] = None,
         eval_threshold: float = 0.5,
+        use_focal_loss: bool = False,
+        focal_gamma: float = 2.0,
         # MS-TCN specific
         num_stages: int = 4,
         num_layers: int = 10,
@@ -76,7 +78,9 @@ class BehaviorRecognitionModule(pl.LightningModule):
             self.criterion = MSTCNLoss(
                 num_classes=num_classes,
                 smoothing_weight=smoothing_weight,
-                class_weights=class_weights
+                class_weights=class_weights,
+                use_focal_loss=use_focal_loss,
+                focal_gamma=focal_gamma
             )
         elif model_name == 'tcn_transformer':
             self.model = TCNTransformer(
@@ -382,19 +386,24 @@ def compute_class_weights(
     labels: np.ndarray,
     method: str = 'effective_num',
     beta: float = 0.9999,
-    is_counts: bool = False
+    is_counts: bool = False,
+    total_samples: Optional[int] = None
 ) -> torch.Tensor:
     """
     Compute class weights for imbalanced data.
 
+    For multi-label classification with BCE loss, this computes pos_weight
+    which balances positive vs negative examples for each class.
+
     Args:
-        labels: Array of labels or precomputed class counts
-        method: 'inverse', 'effective_num', or 'sqrt_inverse'
+        labels: Array of labels or precomputed class counts (positive counts per class)
+        method: 'inverse', 'effective_num', 'sqrt_inverse', or 'pos_neg_ratio'
         beta: Beta parameter for effective number weighting
         is_counts: Treat `labels` as already-aggregated class counts when True
+        total_samples: Total number of samples (frames), needed for pos_neg_ratio method
 
     Returns:
-        Class weight tensor
+        Class weight tensor (pos_weight for BCE loss)
     """
     if isinstance(labels, torch.Tensor):
         labels = labels.detach().cpu().numpy()
@@ -412,20 +421,41 @@ def compute_class_weights(
         class_counts = label_array.astype(np.float64)
 
     class_counts = np.asarray(class_counts, dtype=np.float64)
-    class_counts[class_counts < 1e-6] = 1e-6
 
-    if method == 'inverse':
-        weights = 1.0 / (class_counts + 1)
+    # Track which classes have actual positive examples
+    has_positives = class_counts > 0
+
+    # For classes with zero counts, use 1.0 as placeholder (will be set to neutral weight)
+    safe_counts = np.where(has_positives, class_counts, 1.0)
+
+    if method == 'pos_neg_ratio':
+        # Compute pos_weight = num_negatives / num_positives for BCE
+        # This properly balances positive vs negative examples
+        if total_samples is None:
+            # Estimate total samples from max count (assume at least one class has all positives)
+            total_samples = max(safe_counts.max() * 2, safe_counts.sum())
+        neg_counts = total_samples - safe_counts
+        weights = neg_counts / (safe_counts + 1e-8)
+        # Use sqrt to dampen extreme weights and prevent gradient explosion
+        weights = np.sqrt(weights)
+        # Clip to prevent extreme weights (max ~10x, not 100x)
+        weights = np.clip(weights, 1.0, 10.0)
+    elif method == 'inverse':
+        weights = 1.0 / (safe_counts + 1)
     elif method == 'sqrt_inverse':
-        weights = 1.0 / np.sqrt(class_counts + 1)
+        weights = 1.0 / np.sqrt(safe_counts + 1)
     elif method == 'effective_num':
         # Effective number of samples
-        effective_num = 1.0 - np.power(beta, class_counts)
+        effective_num = 1.0 - np.power(beta, safe_counts)
         weights = (1.0 - beta) / (effective_num + 1e-8)
+        # Normalize only over classes that have positives
+        if has_positives.any():
+            weights_mean = weights[has_positives].mean()
+            weights = weights / (weights_mean + 1e-8)
     else:
         weights = np.ones_like(class_counts, dtype=np.float32)
 
-    # Normalize
-    weights = weights / (weights.mean() + 1e-8)
+    # Set weight to 1.0 for classes with no positives (neutral, won't affect loss)
+    weights = np.where(has_positives, weights, 1.0)
 
     return torch.tensor(weights, dtype=torch.float32)

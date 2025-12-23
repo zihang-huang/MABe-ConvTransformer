@@ -462,11 +462,15 @@ class TCNTransformerLoss(nn.Module):
         if self.multi_label or targets.dim() == 3:
             # Binary cross entropy for multi-label
             pos_weight = self.class_weights if self.class_weights is not None else None
+            # Clamp predictions to prevent numerical instability
+            predictions_clamped = torch.clamp(predictions, -20.0, 20.0)
             cls_loss = F.binary_cross_entropy_with_logits(
-                predictions, targets.float(),
+                predictions_clamped, targets.float(),
                 reduction='none',
                 pos_weight=pos_weight
             )
+            # Clamp loss values to prevent gradient explosion
+            cls_loss = torch.clamp(cls_loss, 0.0, 100.0)
             cls_loss = cls_loss.mean(dim=-1)
         else:
             # Cross entropy for single-label

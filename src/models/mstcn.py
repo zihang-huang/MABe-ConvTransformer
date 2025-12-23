@@ -302,8 +302,9 @@ class MSTCN(nn.Module):
         stage_outputs.append(out)
 
         # Refinement stages
+        # Use sigmoid for multi-label classification (NOT softmax which is for single-label)
         for stage in self.stages:
-            out = stage(F.softmax(out, dim=1))
+            out = stage(torch.sigmoid(out))
             if mask is not None:
                 out = out * mask
             stage_outputs.append(out)
@@ -380,7 +381,7 @@ class MSTCNLoss(nn.Module):
     Combined loss for MS-TCN++ training.
 
     Includes:
-    - Classification loss (cross-entropy or focal loss)
+    - Classification loss (BCE or focal loss for multi-label)
     - Temporal smoothing loss (T-MSE)
     - Optional boundary loss
     """
@@ -407,6 +408,39 @@ class MSTCNLoss(nn.Module):
             self.register_buffer('class_weights', class_weights)
         else:
             self.class_weights = None
+
+    def _binary_focal_loss(
+        self,
+        predictions: torch.Tensor,
+        targets: torch.Tensor,
+        gamma: float = 2.0,
+        alpha: float = 0.25
+    ) -> torch.Tensor:
+        """
+        Focal loss for multi-label binary classification.
+        More stable than pos_weight for extreme class imbalance.
+
+        FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+        """
+        # Clamp predictions for numerical stability
+        predictions = torch.clamp(predictions, -20.0, 20.0)
+
+        # Compute probabilities
+        p = torch.sigmoid(predictions)
+
+        # Compute focal weights
+        p_t = p * targets + (1 - p) * (1 - targets)
+        focal_weight = (1 - p_t) ** gamma
+
+        # Compute BCE
+        bce = F.binary_cross_entropy_with_logits(predictions, targets, reduction='none')
+
+        # Apply focal weight and alpha balancing
+        # alpha for positive class, (1-alpha) for negative class
+        alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+        focal_loss = alpha_t * focal_weight * bce
+
+        return focal_loss
 
     def forward(
         self,
@@ -481,11 +515,18 @@ class MSTCNLoss(nn.Module):
 
         # Handle multi-label targets
         if targets.dim() == 3:  # (batch, seq_len, num_classes)
-            # Binary cross entropy for multi-label
-            pos_weight = self.class_weights if self.class_weights is not None else None
-            loss = F.binary_cross_entropy_with_logits(
-                predictions, targets, reduction='none', pos_weight=pos_weight
-            )
+            if self.use_focal_loss:
+                # Focal loss for multi-label - better for extreme class imbalance
+                loss = self._binary_focal_loss(predictions, targets, gamma=self.focal_gamma)
+            else:
+                # Standard BCE for multi-label
+                pos_weight = self.class_weights if self.class_weights is not None else None
+                predictions_clamped = torch.clamp(predictions, -20.0, 20.0)
+                loss = F.binary_cross_entropy_with_logits(
+                    predictions_clamped, targets, reduction='none', pos_weight=pos_weight
+                )
+            # Clamp loss values to prevent gradient explosion
+            loss = torch.clamp(loss, 0.0, 100.0)
             loss = loss.mean(dim=-1)  # Average over classes
         else:  # (batch, seq_len)
             # Cross entropy for single-label
@@ -535,8 +576,9 @@ class MSTCNLoss(nn.Module):
         Encourages smooth predictions over time.
         """
         # Compute difference between consecutive frames
-        log_probs = F.log_softmax(predictions, dim=-1)
-        diff = log_probs[:, 1:, :] - log_probs[:, :-1, :]
+        # Use sigmoid for multi-label (NOT log_softmax which is for single-label)
+        probs = torch.sigmoid(predictions)
+        diff = probs[:, 1:, :] - probs[:, :-1, :]
         smooth_loss = torch.clamp(diff ** 2, min=0, max=16).mean(dim=-1)
 
         if mask is not None:
