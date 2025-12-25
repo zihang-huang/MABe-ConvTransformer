@@ -14,13 +14,14 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
+import pandas as pd
 import torch
 from omegaconf import OmegaConf
 from sklearn.metrics import (
@@ -41,6 +42,14 @@ from torch.utils.data import DataLoader
 from src.data.dataset import MABeDataModule, PrecomputedWindowDataset
 from src.models.lightning_module import BehaviorRecognitionModule
 from src.utils.metrics import per_class_statistics
+from src.utils.postprocessing import (
+    aggregate_window_predictions,
+    apply_nms,
+    create_submission,
+    extract_segments,
+    merge_segments,
+    BehaviorSegment,
+)
 
 
 def load_config(config_path: Path, overrides: Dict = None) -> Dict:
@@ -120,16 +129,49 @@ def prepare_dataloader(config: Dict, split: str) -> Tuple[DataLoader, List[str]]
     return dataloader, behaviors
 
 
+def _to_scalar(value: Any) -> Any:
+    """Convert tensors/NumPy scalars to plain Python values."""
+    if isinstance(value, torch.Tensor):
+        value = value.item()
+    if isinstance(value, np.generic):
+        value = value.item()
+    return value
+
+
+def _format_mouse_id(mouse_id: Any, allow_self: bool = True) -> str:
+    """Normalize mouse identifiers to submission format (mouseX or self)."""
+    mouse_id = _to_scalar(mouse_id)
+    if isinstance(mouse_id, str):
+        cleaned = mouse_id.strip()
+        if cleaned.lower().startswith("mouse"):
+            return cleaned
+        if cleaned.lstrip("-").isdigit():
+            mouse_id = int(cleaned)
+        else:
+            return cleaned
+    try:
+        mouse_int = int(mouse_id)
+    except (TypeError, ValueError):
+        return str(mouse_id)
+
+    if allow_self and mouse_int == -1:
+        return "self"
+    return f"mouse{mouse_int}"
+
+
 def collect_predictions(
     model: BehaviorRecognitionModule,
     dataloader: DataLoader,
     device: torch.device,
-) -> Tuple[np.ndarray, np.ndarray]:
+    keep_windows: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, List[Dict]]:
     """
     Run model on dataloader and return flattened (frames x classes) arrays for labels and probabilities.
+    Optionally collect window-level predictions with metadata for submission formatting.
     """
     all_probs = []
     all_labels = []
+    window_predictions: List[Dict] = []
 
     model.eval()
     with torch.no_grad():
@@ -142,6 +184,22 @@ def collect_predictions(
 
             logits = model(features, mask)
             probs = torch.sigmoid(logits)
+
+            if keep_windows:
+                for i in range(features.shape[0]):
+                    window_prob = probs[i].detach().cpu().numpy()
+                    if mask is not None:
+                        window_mask = mask[i].detach().cpu().numpy().reshape(-1, 1)
+                        window_prob = window_prob * window_mask
+                    window_predictions.append(
+                        {
+                            "video_id": _to_scalar(batch["video_id"][i]),
+                            "agent_id": _to_scalar(batch["agent_id"][i]),
+                            "target_id": _to_scalar(batch["target_id"][i]),
+                            "start_frame": int(_to_scalar(batch["start_frame"][i])),
+                            "probabilities": window_prob,
+                        }
+                    )
 
             # Use reshape to handle potential non-contiguous tensors from model outputs.
             probs_flat = probs.reshape(-1, probs.shape[-1])
@@ -158,7 +216,7 @@ def collect_predictions(
     y_probs = torch.cat(all_probs, dim=0).numpy()
     y_true = torch.cat(all_labels, dim=0).numpy()
 
-    return y_true, y_probs
+    return y_true, y_probs, window_predictions
 
 
 def compute_metric_summary(
@@ -249,6 +307,49 @@ def compute_metric_summary(
         }
 
     return metrics, mcm, dominant_cm, class_report
+
+
+def build_submission_rows(
+    window_predictions: List[Dict],
+    behaviors: List[str],
+    threshold: float,
+    min_duration: int,
+    smoothing_kernel: int,
+    nms_threshold: float,
+    merge_gap: int = 5,
+) -> List[Dict]:
+    """
+    Convert window-level predictions into submission-format rows.
+    """
+    aggregated = aggregate_window_predictions(window_predictions, overlap_strategy="average")
+    all_segments: Dict[Tuple[int, Any, Any], List[BehaviorSegment]] = {}
+
+    for (video_id, agent_id, target_id), frame_probs in aggregated.items():
+        raw_segments = extract_segments(
+            frame_probs,
+            behaviors,
+            threshold=threshold,
+            min_duration=min_duration,
+            smoothing_kernel=smoothing_kernel,
+        )
+        merged = merge_segments(raw_segments, gap_threshold=merge_gap)
+        final_segments = apply_nms(merged, iou_threshold=nms_threshold)
+
+        segment_objects = [
+            BehaviorSegment(
+                video_id=int(_to_scalar(video_id)),
+                agent_id=_format_mouse_id(agent_id, allow_self=False),
+                target_id=_format_mouse_id(target_id, allow_self=True),
+                action=behavior,
+                start_frame=int(start),
+                stop_frame=int(stop),
+                confidence=float(conf),
+            )
+            for behavior, start, stop, conf in final_segments
+        ]
+        all_segments[(video_id, agent_id, target_id)] = segment_objects
+
+    return create_submission(all_segments, min_duration=min_duration)
 
 
 def plot_per_class_confusion(conf_matrix: np.ndarray, behaviors: List[str], output_path: Path):
@@ -378,6 +479,17 @@ def parse_args() -> argparse.Namespace:
         help="Directory to write evaluation artifacts. Defaults to <config.paths.output_dir>/eval.",
     )
     parser.add_argument("--device", type=str, default=None, help="Device to use (e.g., cuda, cpu). Auto-detected if unset.")
+    parser.add_argument(
+        "--export_submission",
+        action="store_true",
+        help="Write submission-format predictions alongside metrics.",
+    )
+    parser.add_argument(
+        "--submission_path",
+        type=str,
+        default=None,
+        help="Optional custom path for submission CSV. Defaults to <output_dir>/submission.csv when export is enabled.",
+    )
     return parser.parse_args()
 
 
@@ -391,6 +503,7 @@ def main():
     print(f"[device] Using {device}")
 
     threshold = args.threshold if args.threshold is not None else config.get("evaluation", {}).get("threshold", 0.5)
+    export_submission = bool(args.export_submission or args.submission_path)
 
     dataloader, behaviors = prepare_dataloader(config, args.split)
     print(f"[data] Loaded {len(dataloader.dataset)} windows from '{args.split}' split with {len(behaviors)} classes.")
@@ -419,7 +532,12 @@ def main():
     model.to(device)
 
     print("[eval] Running inference...")
-    y_true, y_probs = collect_predictions(model, dataloader, device)
+    y_true, y_probs, window_predictions = collect_predictions(
+        model,
+        dataloader,
+        device,
+        keep_windows=export_submission,
+    )
 
     metrics, conf_matrix, dominant_cm, class_report = compute_metric_summary(
         y_true,
@@ -444,6 +562,24 @@ def main():
     plot_primary_confusion(dominant_cm, behaviors, run_dir / "confusion_primary_label.png")
     plot_per_class_f1(metrics["per_class"], run_dir / "per_class_f1.png")
     plot_roc_curves(y_true, y_probs, run_dir / "roc_curves.png")
+
+    if export_submission:
+        eval_cfg = config.get("evaluation", {})
+        submission_rows = build_submission_rows(
+            window_predictions,
+            behaviors,
+            threshold=threshold,
+            min_duration=int(eval_cfg.get("min_duration", 2)),
+            smoothing_kernel=int(eval_cfg.get("smoothing_kernel", 5)),
+            nms_threshold=float(eval_cfg.get("nms_threshold", 0.3)),
+        )
+        submission_path = Path(args.submission_path) if args.submission_path else run_dir / "submission.csv"
+        submission_df = pd.DataFrame(
+            submission_rows,
+            columns=["row_id", "video_id", "agent_id", "target_id", "action", "start_frame", "stop_frame"],
+        )
+        submission_df.to_csv(submission_path, index=False)
+        print(f"[predictions] Submission-format predictions saved to {submission_path}")
 
     print(f"[done] Metrics and plots written to {run_dir}")
     print(f"macro F1: {metrics['macro_f1']:.4f} | micro F1: {metrics['micro_f1']:.4f}")
