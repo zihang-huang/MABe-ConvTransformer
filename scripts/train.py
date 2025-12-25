@@ -26,9 +26,13 @@ from pytorch_lightning.callbacks import (
 )
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 import torch
+from torch.serialization import add_safe_globals
 import pandas as pd
 import numpy as np
 from omegaconf import OmegaConf
+
+# Allow legacy numpy scalar pickles when loading weights-only checkpoints (PyTorch 2.6 safety change)
+add_safe_globals([np.core.multiarray.scalar])
 
 from src.data.dataset import MABeDataModule
 from src.models.lightning_module import BehaviorRecognitionModule, compute_class_weights
@@ -116,11 +120,17 @@ def collect_class_counts_from_precomputed(dataset) -> tuple:
 
     counts = torch.zeros(dataset.num_classes, dtype=torch.float64)
     total_samples = 0
-    split_root = dataset.root / dataset.split
 
-    for shard_info in dataset.shards:
-        shard_path = split_root / shard_info['path']
-        shard = torch.load(shard_path, map_location='cpu')
+    if hasattr(dataset, "shards_data") and dataset.shards_data:
+        loaded_shards = dataset.shards_data
+    else:
+        split_root = dataset.root / dataset.split
+        loaded_shards = []
+        for shard_info in dataset.shards:
+            shard_path = split_root / shard_info['path']
+            loaded_shards.append(torch.load(shard_path, map_location='cpu'))
+
+    for shard in loaded_shards:
         counts += shard['labels'].sum(dim=(0, 1)).double()
         total_samples += shard['labels'].shape[0] * shard['labels'].shape[1]
 
@@ -201,7 +211,7 @@ def setup_logger(config: dict):
     return logger
 
 
-def main(config_path: str = None, **overrides):
+def main(config_path: str = None, ckpt_path: Optional[str] = None, **overrides):
     """Main training function."""
     # Load configuration
     if config_path is None:
@@ -288,7 +298,7 @@ def main(config_path: str = None, **overrides):
 
     # Train
     print("Starting training...")
-    trainer.fit(model, data_module)
+    trainer.fit(model, data_module, ckpt_path=ckpt_path)
 
     # Test with best checkpoint
     print("Testing with best checkpoint...")
@@ -314,6 +324,7 @@ if __name__ == '__main__':
     parser.add_argument('--use_precomputed', action='store_true',
                         help='Use precomputed shards instead of raw parquet')
     parser.add_argument('--precomputed_dir', type=str, help='Directory with precomputed shards')
+    parser.add_argument('--ckpt_path', type=str, help='Path to checkpoint to resume training from')
 
     args = parser.parse_args()
 
@@ -334,4 +345,4 @@ if __name__ == '__main__':
     if args.precomputed_dir:
         overrides['data.precomputed_dir'] = args.precomputed_dir
 
-    main(args.config, **overrides)
+    main(args.config, ckpt_path=args.ckpt_path, **overrides)

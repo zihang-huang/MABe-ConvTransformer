@@ -162,6 +162,9 @@ class BehaviorRecognitionModule(pl.LightningModule):
         metrics = self._compute_metrics(predictions, labels, mask)
         for key, value in metrics.items():
             self.log(f'val/{key}', value, prog_bar=(key in ['f1', 'accuracy']))
+        # Provide slash-free alias so checkpoint filenames can include F1 without defaulting to 0
+        if 'f1' in metrics:
+            self.log('val_f1', metrics['f1'], prog_bar=True)
 
         return {
             'loss': loss,

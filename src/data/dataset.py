@@ -941,14 +941,21 @@ class PrecomputedWindowDataset(Dataset):
             )
         self.shards = manifest['shards']
 
+        # Load all shards into memory up front to avoid disk I/O during training.
+        self.shards_data: List[Dict[str, Any]] = []
+        for shard_info in self.shards:
+            shard_path = self.root / self.split / shard_info['path']
+            shard = torch.load(shard_path, map_location='cpu')
+            self.shards_data.append(shard)
+        if self.shards_data:
+            total_samples = sum(s['num_samples'] for s in self.shards)
+            print(f"[data] Loaded {len(self.shards_data)} precomputed shards for {split} into memory ({total_samples} samples).")
+
         self._cum_counts = []
         total = 0
         for shard in self.shards:
             total += shard['num_samples']
             self._cum_counts.append(total)
-
-        self._loaded_shard_idx = None
-        self._loaded_shard = None
 
     def __len__(self) -> int:
         return self._cum_counts[-1] if self._cum_counts else 0
@@ -985,13 +992,4 @@ class PrecomputedWindowDataset(Dataset):
         raise IndexError(idx)
 
     def _load_shard(self, shard_idx: int) -> Dict[str, Any]:
-        if shard_idx == self._loaded_shard_idx and self._loaded_shard is not None:
-            return self._loaded_shard
-
-        shard_info = self.shards[shard_idx]
-        shard_path = self.root / self.split / shard_info['path']
-        shard = torch.load(shard_path, map_location='cpu')
-
-        self._loaded_shard_idx = shard_idx
-        self._loaded_shard = shard
-        return shard
+        return self.shards_data[shard_idx]

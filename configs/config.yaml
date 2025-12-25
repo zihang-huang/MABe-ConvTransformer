@@ -134,7 +134,7 @@ model:
 
 # Training settings
 training:
-  batch_size: 16
+  batch_size: 512
   num_workers: 8
   max_epochs: 1000
   learning_rate: 0.0001  # Reduced from 0.0005 to prevent gradient explosion with class weights
@@ -162,7 +162,7 @@ training:
 
   # Early stopping
   early_stopping:
-    patience: 15
+    patience: 30
     monitor: val/f1
     mode: max
 

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Evaluate a trained behavior recognition model on labeled data and visualize metrics.
 
