@@ -10,10 +10,10 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import torch
-import yaml
+from omegaconf import OmegaConf
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -22,9 +22,15 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.data.dataset import MABeDataModule  # noqa: E402
 
 
-def load_config(config_path: Path) -> Dict:
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
+def load_config(config_path: Path, overrides: Optional[dict] = None) -> Dict:
+    """
+    Load YAML config and resolve ${...} references via OmegaConf so derived paths work on Windows.
+    """
+    conf = OmegaConf.load(config_path)
+    if overrides:
+        for key, value in overrides.items():
+            OmegaConf.update(conf, key, value, merge=True)
+    return OmegaConf.to_container(conf, resolve=True)
 
 
 def flush_shard(

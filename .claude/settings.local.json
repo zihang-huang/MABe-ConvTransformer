@@ -6,7 +6,11 @@
       "Bash(.venv/Scripts/python.exe:*)",
       "Bash(\"c:\\\\Users\\\\73506\\\\MABe-ConvTransformer\\\\.venv\\\\Scripts\\\\python.exe\" -c:*)",
       "Bash(\"c:\\\\Users\\\\73506\\\\MABe-ConvTransformer\\\\.venv\\\\Scripts\\\\python.exe\":*)",
-      "Bash(del \"c:\\\\Users\\\\73506\\\\MABe-ConvTransformer\\\\check_labels.py\")"
+      "Bash(del \"c:\\\\Users\\\\73506\\\\MABe-ConvTransformer\\\\check_labels.py\")",
+      "Bash(dir \"c:\\\\Users\\\\73506\\\\MABe-ConvTransformer\\\\outputs\\\\checkpoints\")",
+      "Bash(dir:*)",
+      "Bash(powershell -Command \"Get-ChildItem -Path ''c:\\\\Users\\\\73506\\\\MABe-ConvTransformer'' | Select-Object Name\")",
+      "Bash(powershell -Command \"Get-ChildItem -Path ''c:\\\\Users\\\\73506\\\\MABe-ConvTransformer\\\\`$paths.data_dir\\\\checkpoints'' | Select-Object Name, Length\")"
     ]
   }
 }

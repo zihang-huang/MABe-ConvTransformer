@@ -10,7 +10,7 @@ Usage:
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -25,10 +25,10 @@ from pytorch_lightning.callbacks import (
     RichProgressBar
 )
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
-import yaml
 import torch
 import pandas as pd
 import numpy as np
+from omegaconf import OmegaConf
 
 from src.data.dataset import MABeDataModule
 from src.models.lightning_module import BehaviorRecognitionModule, compute_class_weights
@@ -54,11 +54,18 @@ class TrainingHeartbeat(pl.Callback):
             print(f"[progress] global step {step} (epoch {trainer.current_epoch + 1})", flush=True)
 
 
-def load_config(config_path: str) -> dict:
-    """Load configuration from YAML file."""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
+def load_config(config_path: Union[str, Path], overrides: Optional[dict] = None) -> dict:
+    """
+    Load configuration from YAML file and resolve ${...} references using OmegaConf.
+    Overrides are applied with dot-notation keys so dependent paths stay in sync.
+    """
+    conf = OmegaConf.load(config_path)
+
+    if overrides:
+        for key, value in overrides.items():
+            OmegaConf.update(conf, key, value, merge=True)
+
+    return OmegaConf.to_container(conf, resolve=True)
 
 
 def collect_class_counts_from_annotations(dataset, target_fps: float) -> Optional[np.ndarray]:
@@ -199,15 +206,7 @@ def main(config_path: str = None, **overrides):
     # Load configuration
     if config_path is None:
         config_path = project_root / 'configs' / 'config.yaml'
-    config = load_config(config_path)
-
-    # Apply overrides
-    for key, value in overrides.items():
-        keys = key.split('.')
-        d = config
-        for k in keys[:-1]:
-            d = d[k]
-        d[keys[-1]] = value
+    config = load_config(config_path, overrides)
 
     # Set random seed
     pl.seed_everything(42)
