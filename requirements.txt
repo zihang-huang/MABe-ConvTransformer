@@ -19,6 +19,7 @@ tensorboard>=2.13.0
 wandb>=0.15.0
 tqdm>=4.65.0
 rich>=13.0.0
+matplotlib>=3.7.0
 
 # Metrics and evaluation
 scikit-learn>=1.2.0
