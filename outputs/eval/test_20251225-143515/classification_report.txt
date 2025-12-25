@@ -1,0 +1,44 @@
+                 precision    recall  f1-score   support
+
+     biteobject       0.00      0.00      0.00         0
+          climb       0.00      0.00      0.00         0
+            dig       0.00      0.00      0.00         0
+  exploreobject       0.00      0.00      0.00         0
+         freeze       0.00      0.00      0.00         0
+   genitalgroom       0.00      0.00      0.00         0
+         huddle       0.00      0.00      0.00         0
+           rear       0.00      0.00      0.00         0
+           rest       0.00      0.00      0.00         0
+            run       0.00      0.00      0.00         0
+      selfgroom       0.00      0.00      0.00         0
+      allogroom       0.00      0.00      0.00         0
+       approach       0.00      0.00      0.00         0
+         attack       0.00      0.00      0.00         0
+   attemptmount       0.00      0.00      0.00         0
+          avoid       0.00      0.00      0.00         0
+          chase       0.00      0.00      0.00         0
+    chaseattack       0.00      0.00      0.00         0
+         defend       0.00      0.00      0.00         0
+      disengage       0.00      0.00      0.00         0
+      dominance       0.00      0.00      0.00         0
+ dominancegroom       0.00      0.00      0.00         0
+ dominancemount       0.00      0.00      0.00         0
+      ejaculate       0.00      0.00      0.00         0
+         escape       0.00      0.00      0.00         0
+         flinch       0.00      0.00      0.00         0
+         follow       0.00      0.00      0.00         0
+       intromit       0.00      0.00      0.00         0
+          mount       0.00      0.00      0.00         0
+reciprocalsniff       0.00      0.00      0.00         0
+       shepherd       0.00      0.00      0.00         0
+          sniff       0.00      0.00      0.00         0
+      sniffbody       0.00      0.00      0.00         0
+      sniffface       0.00      0.00      0.00         0
+   sniffgenital       0.00      0.00      0.00         0
+         submit       0.00      0.00      0.00         0
+         tussle       0.00      0.00      0.00         0
+
+      micro avg       0.00      0.00      0.00         0
+      macro avg       0.00      0.00      0.00         0
+   weighted avg       0.00      0.00      0.00         0
+    samples avg       0.00      0.00      0.00         0

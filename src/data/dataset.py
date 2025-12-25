@@ -618,6 +618,7 @@ class MABeDataModule(pl.LightningDataModule):
         stride: int = 256,
         target_fps: float = 30.0,
         val_split: float = 0.2,
+        test_split: float = 0.1,
         stratify_by_lab: bool = True,
         prefetch_factor: int = 4,
         tracking_cache_size: int = 4,
@@ -634,6 +635,7 @@ class MABeDataModule(pl.LightningDataModule):
         self.stride = stride
         self.target_fps = target_fps
         self.val_split = val_split
+        self.test_split = test_split
         self.stratify_by_lab = stratify_by_lab
         self.prefetch_factor = prefetch_factor
         self.tracking_cache_size = tracking_cache_size
@@ -644,6 +646,9 @@ class MABeDataModule(pl.LightningDataModule):
         self.train_dataset = None
         self.val_dataset = None
         self.test_dataset = None
+        self._train_split_df = None
+        self._val_split_df = None
+        self._test_split_df = None
 
     def setup(
         self,
@@ -663,12 +668,12 @@ class MABeDataModule(pl.LightningDataModule):
             self.precomputed_dir = Path(precomputed_dir)
 
         train_csv = self.data_dir / 'train.csv'
-        test_csv = self.data_dir / 'test.csv'
 
         if stage == 'fit' or stage is None:
             if use_precomputed and self.precomputed_dir:
                 pretrain_manifest = self.precomputed_dir / 'train' / 'manifest.json'
                 preval_manifest = self.precomputed_dir / 'val' / 'manifest.json'
+                pretest_manifest = self.precomputed_dir / 'test' / 'manifest.json'
                 if pretrain_manifest.exists() and preval_manifest.exists():
                     try:
                         print(f"[data] Using precomputed shards from {self.precomputed_dir}")
@@ -682,6 +687,12 @@ class MABeDataModule(pl.LightningDataModule):
                             split='val',
                             apply_augment=False
                         )
+                        if pretest_manifest.exists():
+                            self.test_dataset = PrecomputedWindowDataset(
+                                root=self.precomputed_dir,
+                                split='test',
+                                apply_augment=False
+                            )
                         self.behaviors = self.train_dataset.behaviors
                         # Behaviors provided by manifest; skip raw loading.
                         return
@@ -690,11 +701,15 @@ class MABeDataModule(pl.LightningDataModule):
 
             train_df = pd.read_csv(train_csv)
 
-            # Split train/val
-            if self.stratify_by_lab:
-                train_split, val_split = self._stratified_split(train_df)
+            # Reuse cached split when available to keep consistency across stages
+            if self._train_split_df is None:
+                if self.stratify_by_lab:
+                    train_split, val_split, test_split = self._stratified_split_three(train_df)
+                else:
+                    train_split, val_split, test_split = self._random_split_three(train_df)
+                self._train_split_df, self._val_split_df, self._test_split_df = train_split, val_split, test_split
             else:
-                train_split, val_split = self._random_split(train_df)
+                train_split, val_split, test_split = self._train_split_df, self._val_split_df, self._test_split_df
 
             self.train_dataset = MABeDataset(
                 metadata_df=train_split,
@@ -724,6 +739,20 @@ class MABeDataModule(pl.LightningDataModule):
                 annotation_cache_size=self.annotation_cache_size
             )
 
+            self.test_dataset = MABeDataset(
+                metadata_df=test_split,
+                tracking_dir=self.data_dir / 'train_tracking',
+                annotation_dir=self.data_dir / 'train_annotation',
+                behaviors=self.behaviors or self.train_dataset.behaviors,
+                window_size=self.window_size,
+                stride=self.window_size,  # No overlap for held-out test
+                target_fps=self.target_fps,
+                augment=False,
+                is_train=False,
+                tracking_cache_size=self.tracking_cache_size,
+                annotation_cache_size=self.annotation_cache_size
+            )
+
             # Update behaviors from training data
             if self.behaviors is None:
                 self.behaviors = self.train_dataset.behaviors
@@ -743,16 +772,40 @@ class MABeDataModule(pl.LightningDataModule):
                     except ValueError as e:
                         print(f"[data] Precomputed test shards invalid: {e}. Falling back to raw data.")
 
-            if test_csv.exists():
-                test_df = pd.read_csv(test_csv)
+            # If already created during fit, keep it; otherwise build from cached split
+            if self._test_split_df is None and train_csv.exists():
+                # Build splits lazily when only stage='test' is requested
+                train_df = pd.read_csv(train_csv)
+                if self.stratify_by_lab:
+                    train_split, val_split, test_split = self._stratified_split_three(train_df)
+                else:
+                    train_split, val_split, test_split = self._random_split_three(train_df)
+                self._train_split_df, self._val_split_df, self._test_split_df = train_split, val_split, test_split
+                # Preserve behaviors
+                if self.behaviors is None and train_split is not None:
+                    tmp_dataset = MABeDataset(
+                        metadata_df=train_split,
+                        tracking_dir=self.data_dir / 'train_tracking',
+                        annotation_dir=self.data_dir / 'train_annotation',
+                        behaviors=None,
+                        window_size=self.window_size,
+                        stride=self.stride,
+                        target_fps=self.target_fps,
+                        augment=False,
+                        is_train=True,
+                        tracking_cache_size=self.tracking_cache_size,
+                        annotation_cache_size=self.annotation_cache_size
+                    )
+                    self.behaviors = tmp_dataset.behaviors
 
+            if self.test_dataset is None and self._test_split_df is not None:
                 self.test_dataset = MABeDataset(
-                    metadata_df=test_df,
-                    tracking_dir=self.data_dir / 'test_tracking',
-                    annotation_dir=None,
+                    metadata_df=self._test_split_df,
+                    tracking_dir=self.data_dir / 'train_tracking',
+                    annotation_dir=self.data_dir / 'train_annotation',
                     behaviors=self.behaviors,
                     window_size=self.window_size,
-                    stride=self.window_size // 2,
+                    stride=self.window_size,
                     target_fps=self.target_fps,
                     augment=False,
                     is_train=False,
@@ -760,33 +813,43 @@ class MABeDataModule(pl.LightningDataModule):
                     annotation_cache_size=self.annotation_cache_size
                 )
 
-    def _stratified_split(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Split data stratified by lab_id."""
+    def _stratified_split_three(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """Split data into train/val/test stratified by lab_id."""
         train_dfs = []
         val_dfs = []
+        test_dfs = []
 
         for lab_id in df['lab_id'].unique():
             lab_df = df[df['lab_id'] == lab_id]
-            n_val = max(1, int(len(lab_df) * self.val_split))
-
-            indices = np.random.permutation(len(lab_df))
+            n = len(lab_df)
+            n_val = max(1, int(n * self.val_split))
+            n_test = max(1, int(n * self.test_split))
+            if n_val + n_test >= n:
+                # Ensure at least one sample remains for training when possible
+                n_test = max(1, n - n_val - 1)
+            indices = np.random.permutation(n)
             val_idx = indices[:n_val]
-            train_idx = indices[n_val:]
-
+            test_idx = indices[n_val:n_val + n_test]
+            train_idx = indices[n_val + n_test:]
             val_dfs.append(lab_df.iloc[val_idx])
-            train_dfs.append(lab_df.iloc[train_idx])
+            test_dfs.append(lab_df.iloc[test_idx])
+            if len(train_idx) > 0:
+                train_dfs.append(lab_df.iloc[train_idx])
 
-        return pd.concat(train_dfs), pd.concat(val_dfs)
+        return pd.concat(train_dfs), pd.concat(val_dfs), pd.concat(test_dfs)
 
-    def _random_split(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Random train/val split."""
-        n_val = int(len(df) * self.val_split)
-        indices = np.random.permutation(len(df))
-
+    def _random_split_three(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """Random train/val/test split."""
+        n = len(df)
+        n_val = int(n * self.val_split)
+        n_test = int(n * self.test_split)
+        if n_val + n_test >= n:
+            n_test = max(1, n - n_val - 1)
+        indices = np.random.permutation(n)
         val_df = df.iloc[indices[:n_val]]
-        train_df = df.iloc[indices[n_val:]]
-
-        return train_df, val_df
+        test_df = df.iloc[indices[n_val:n_val + n_test]]
+        train_df = df.iloc[indices[n_val + n_test:]]
+        return train_df, val_df, test_df
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(

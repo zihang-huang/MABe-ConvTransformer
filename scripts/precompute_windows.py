@@ -146,6 +146,8 @@ def main():
         window_size=config["data"]["window_size"],
         stride=config["data"]["stride"],
         target_fps=config["data"]["target_fps"],
+        val_split=config["data"].get("val_split", 0.2),
+        test_split=config["data"].get("test_split", 0.1),
         tracking_cache_size=config["data"].get("tracking_cache_size", 4),
         annotation_cache_size=config["data"].get("annotation_cache_size", 8),
     )

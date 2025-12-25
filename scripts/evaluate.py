@@ -5,8 +5,8 @@ Evaluate a trained behavior recognition model on labeled data and visualize metr
 Usage:
     python scripts/evaluate.py --checkpoint outputs/checkpoints/last.ckpt --config configs/config.yaml --split val
 
-This script intentionally refuses to run on unlabeled/test splits. Evaluation is only
-performed on datasets that include ground-truth annotations (train/val).
+This script intentionally refuses to run on unlabeled external splits. Evaluation is only
+performed on datasets that include ground-truth annotations (train/val/test from the labeled data).
 """
 
 import argparse
@@ -56,10 +56,10 @@ def load_config(config_path: Path, overrides: Dict = None) -> Dict:
 
 def prepare_dataloader(config: Dict, split: str) -> Tuple[DataLoader, List[str]]:
     """
-    Build a dataloader for a labeled split. Train/val only; test is rejected to avoid unlabeled data.
+    Build a dataloader for a labeled split (train/val/test) using the labeled data.
     """
-    if split not in ("train", "val"):
-        raise ValueError("Only 'train' and 'val' splits are supported for evaluation (unlabeled/test is disallowed).")
+    if split not in ("train", "val", "test"):
+        raise ValueError("Only 'train', 'val', and 'test' splits are supported for evaluation.")
 
     dm = MABeDataModule(
         data_dir=config["paths"]["data_dir"],
@@ -69,6 +69,8 @@ def prepare_dataloader(config: Dict, split: str) -> Tuple[DataLoader, List[str]]
         window_size=config["data"]["window_size"],
         stride=config["data"]["stride"],
         target_fps=config["data"]["target_fps"],
+        val_split=config["data"].get("val_split", 0.2),
+        test_split=config["data"].get("test_split", 0.1),
         tracking_cache_size=config["data"].get("tracking_cache_size", 4),
         annotation_cache_size=config["data"].get("annotation_cache_size", 8),
         use_precomputed=config["data"].get("use_precomputed", False),
@@ -83,6 +85,8 @@ def prepare_dataloader(config: Dict, split: str) -> Tuple[DataLoader, List[str]]
 
     if split == "val":
         dataset = dm.val_dataset
+    elif split == "test":
+        dataset = dm.test_dataset
     else:
         dataset = dm.train_dataset
         # Disable augmentation for evaluation.
@@ -365,7 +369,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a trained model on labeled data.")
     parser.add_argument("--config", type=str, default="configs/config.yaml", help="Path to config file.")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint (.ckpt).")
-    parser.add_argument("--split", type=str, default="val", choices=["train", "val"], help="Dataset split to evaluate.")
+    parser.add_argument("--split", type=str, default="val", choices=["train", "val", "test"], help="Dataset split to evaluate.")
     parser.add_argument("--threshold", type=float, default=None, help="Override decision threshold for metrics.")
     parser.add_argument(
         "--output_dir",
