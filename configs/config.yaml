@@ -137,15 +137,15 @@ training:
   batch_size: 512
   num_workers: 8
   max_epochs: 1000
-  learning_rate: 0.0001  # Reduced from 0.0005 to prevent gradient explosion with class weights
-  weight_decay: 0.0001
+  learning_rate: 0.0032  # Scaled roughly linearly for 32x larger batch
+  weight_decay: 0.0003  # Extra regularization to offset low gradient noise at large batch
   prefetch_factor: 8
 
   # Learning rate scheduler
   scheduler:
     name: cosine
-    warmup_epochs: 5
-    min_lr: 0.00001
+    warmup_epochs: 30  # More warmup epochs to match similar warmup steps with fewer steps/epoch
+    min_lr: 0.00032
 
   # Loss weights
   loss:
@@ -162,7 +162,7 @@ training:
 
   # Early stopping
   early_stopping:
-    patience: 30
+    patience: 150  # More epochs to allow comparable update count with larger batches
     monitor: val/f1
     mode: max
 
