@@ -17,7 +17,7 @@ data:
   window_size: 512  # frames per sample
   stride: 256  # sliding window stride
   val_split: 0.2   # fraction of data for validation
-  test_split: 0.1  # fraction of data for held-out test
+  test_split: 0  # fraction of data for held-out test
   min_segment_duration: 5  # minimum frames for valid segment
   tracking_cache_size: 2
   annotation_cache_size: 4
@@ -178,6 +178,8 @@ evaluation:
   min_duration: 5
   smoothing_kernel: 5
   nms_threshold: 0.3
+  merge_gap: 5
+  segment_eval: true  # Use Kaggle-compatible segment-level F1 for training
 
 # Experiment tracking
 logging:

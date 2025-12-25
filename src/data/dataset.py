@@ -254,7 +254,8 @@ class MABeDataset(Dataset):
             'video_id': sample_info['video_id'],
             'agent_id': sample_info['agent_id'],
             'target_id': sample_info['target_id'],
-            'start_frame': sample_info['start_frame']
+            'start_frame': sample_info['start_frame'],
+            'lab_id': sample_info['lab_id']
         }
 
     def _read_parquet(self, path: Path) -> pd.DataFrame:

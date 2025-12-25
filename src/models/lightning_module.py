@@ -8,10 +8,20 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 from typing import Dict, List, Optional, Tuple, Any
 from collections import defaultdict
+from pathlib import Path
 import numpy as np
+import pandas as pd
 
 from .mstcn import MSTCN, MSTCNLoss
 from .tcn_transformer import TCNTransformer, TCNTransformerLoss
+from ..utils.postprocessing import (
+    aggregate_window_predictions,
+    extract_segments,
+    merge_segments,
+    apply_nms,
+    BehaviorSegment,
+)
+from ..utils.kaggle_metric import mouse_fbeta
 
 
 class BehaviorRecognitionModule(pl.LightningModule):
@@ -40,6 +50,14 @@ class BehaviorRecognitionModule(pl.LightningModule):
         eval_threshold: float = 0.5,
         use_focal_loss: bool = False,
         focal_gamma: float = 2.0,
+        # Segment-level evaluation settings
+        segment_eval: bool = True,
+        min_segment_duration: int = 5,
+        smoothing_kernel: int = 5,
+        nms_threshold: float = 0.3,
+        merge_gap: int = 5,
+        annotation_dir: Optional[str] = None,
+        metadata_csv: Optional[str] = None,
         # MS-TCN specific
         num_stages: int = 4,
         num_layers: int = 10,
@@ -53,7 +71,7 @@ class BehaviorRecognitionModule(pl.LightningModule):
         **kwargs
     ):
         super().__init__()
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=['annotation_dir', 'metadata_csv'])
 
         self.model_name = model_name
         self.input_dim = input_dim
@@ -104,6 +122,19 @@ class BehaviorRecognitionModule(pl.LightningModule):
         self.train_metrics = defaultdict(list)
         self.val_metrics = defaultdict(list)
 
+        # Segment-level evaluation settings
+        self.segment_eval = segment_eval
+        self.min_segment_duration = min_segment_duration
+        self.smoothing_kernel = smoothing_kernel
+        self.nms_threshold = nms_threshold
+        self.merge_gap = merge_gap
+        self.annotation_dir = Path(annotation_dir) if annotation_dir else None
+        self.metadata_csv = Path(metadata_csv) if metadata_csv else None
+        self._solution_df = None  # Cached solution DataFrame
+
+        # Storage for validation predictions (reset each epoch)
+        self.val_predictions: List[Dict] = []
+
     def forward(
         self,
         x: torch.Tensor,
@@ -141,6 +172,10 @@ class BehaviorRecognitionModule(pl.LightningModule):
 
         return loss
 
+    def on_validation_epoch_start(self):
+        """Clear validation predictions at the start of each epoch."""
+        self.val_predictions = []
+
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict:
         """Validation step."""
         features = batch['features']
@@ -158,7 +193,7 @@ class BehaviorRecognitionModule(pl.LightningModule):
         for key, value in loss_dict.items():
             self.log(f'val/{key}', value, prog_bar=(key == 'total_loss'))
 
-        # Compute metrics
+        # Compute frame-level metrics
         metrics = self._compute_metrics(predictions, labels, mask)
         for key, value in metrics.items():
             self.log(f'val/{key}', value, prog_bar=(key in ['f1', 'accuracy']))
@@ -166,11 +201,220 @@ class BehaviorRecognitionModule(pl.LightningModule):
         if 'f1' in metrics:
             self.log('val_f1', metrics['f1'], prog_bar=True)
 
+        # Store predictions for segment-level evaluation
+        if self.segment_eval:
+            probs = torch.sigmoid(predictions).detach().cpu().numpy()
+            batch_size = probs.shape[0]
+            for i in range(batch_size):
+                self.val_predictions.append({
+                    'probabilities': probs[i],
+                    'video_id': self._to_scalar(batch['video_id'][i]),
+                    'agent_id': self._to_scalar(batch['agent_id'][i]),
+                    'target_id': self._to_scalar(batch['target_id'][i]),
+                    'start_frame': self._to_scalar(batch['start_frame'][i]),
+                    'lab_id': batch['lab_id'][i] if 'lab_id' in batch else None,
+                })
+
         return {
             'loss': loss,
             'predictions': predictions.detach(),
             'labels': labels.detach()
         }
+
+    def _to_scalar(self, value):
+        """Convert tensor or numpy array to Python scalar."""
+        if isinstance(value, torch.Tensor):
+            return value.item() if value.numel() == 1 else value.cpu().numpy()
+        elif isinstance(value, np.ndarray):
+            return value.item() if value.size == 1 else value
+        return value
+
+    def on_validation_epoch_end(self):
+        """Compute segment-level F1 at the end of each validation epoch."""
+        if not self.segment_eval or not self.val_predictions:
+            return
+
+        try:
+            segment_f1 = self._compute_segment_f1()
+            if segment_f1 is not None:
+                self.log('val/segment_f1', segment_f1, prog_bar=True, sync_dist=True)
+                self.log('val_segment_f1', segment_f1, prog_bar=True, sync_dist=True)
+        except Exception as e:
+            # Log warning but don't crash training
+            if self.trainer.is_global_zero:
+                print(f"[warn] Segment F1 computation failed: {e}")
+
+    def _compute_segment_f1(self) -> Optional[float]:
+        """Compute Kaggle-compatible segment-level F1."""
+        if not self.val_predictions:
+            return None
+
+        # Aggregate window predictions
+        aggregated = aggregate_window_predictions(
+            self.val_predictions, overlap_strategy='average'
+        )
+
+        # Convert to segments
+        all_segments: List[BehaviorSegment] = []
+        for (video_id, agent_id, target_id), frame_probs in aggregated.items():
+            raw_segments = extract_segments(
+                frame_probs,
+                self.behaviors,
+                threshold=self.eval_threshold,
+                min_duration=self.min_segment_duration,
+                smoothing_kernel=self.smoothing_kernel,
+            )
+            merged = merge_segments(raw_segments, gap_threshold=self.merge_gap)
+            final_segments = apply_nms(merged, iou_threshold=self.nms_threshold)
+
+            # Format agent_id and target_id as 'mouseX' or 'self'
+            formatted_agent = self._format_mouse_id(agent_id, allow_self=False)
+            formatted_target = self._format_mouse_id(target_id, allow_self=True)
+
+            for behavior, start, stop, conf in final_segments:
+                all_segments.append(BehaviorSegment(
+                    video_id=int(self._to_scalar(video_id)),
+                    agent_id=formatted_agent,
+                    target_id=formatted_target,
+                    action=behavior,
+                    start_frame=int(start),
+                    stop_frame=int(stop),
+                    confidence=float(conf),
+                ))
+
+        # Resolve overlaps
+        all_segments = self._resolve_overlaps(all_segments)
+
+        if not all_segments:
+            return 0.0
+
+        # Build submission DataFrame
+        submission_rows = []
+        for row_id, seg in enumerate(all_segments):
+            if seg.duration >= self.min_segment_duration:
+                submission_rows.append({
+                    'video_id': seg.video_id,
+                    'agent_id': seg.agent_id,
+                    'target_id': seg.target_id,
+                    'action': seg.action,
+                    'start_frame': seg.start_frame,
+                    'stop_frame': seg.stop_frame,
+                })
+        submission_df = pd.DataFrame(submission_rows)
+
+        # Load solution DataFrame
+        solution_df = self._get_solution_df()
+        if solution_df is None or solution_df.empty:
+            return None
+
+        # Filter solution to validation videos
+        val_videos = set(submission_df['video_id'].unique())
+        solution_df = solution_df[solution_df['video_id'].isin(val_videos)]
+
+        if solution_df.empty or submission_df.empty:
+            return 0.0
+
+        # Compute Kaggle metric
+        return mouse_fbeta(solution_df, submission_df, beta=1.0)
+
+    def _format_mouse_id(self, mouse_id, allow_self: bool = False) -> str:
+        """Format mouse ID as 'mouseX' or 'self'."""
+        if isinstance(mouse_id, str):
+            if mouse_id.startswith('mouse') or mouse_id == 'self':
+                return mouse_id
+            try:
+                mouse_int = int(mouse_id)
+            except ValueError:
+                return mouse_id
+        elif isinstance(mouse_id, (int, np.integer)):
+            mouse_int = int(mouse_id)
+        else:
+            return str(mouse_id)
+
+        # Check for self-behavior (agent_id == target_id)
+        if allow_self and mouse_int == -1:
+            return 'self'
+
+        return f'mouse{mouse_int}'
+
+    def _resolve_overlaps(self, segments: List[BehaviorSegment]) -> List[BehaviorSegment]:
+        """Resolve overlapping behaviors for same agent-target pair."""
+        from collections import defaultdict
+
+        groups = defaultdict(list)
+        for seg in segments:
+            key = (seg.video_id, seg.agent_id, seg.target_id)
+            groups[key].append(seg)
+
+        resolved = []
+        for key, group_segments in groups.items():
+            group_segments.sort(key=lambda s: (s.start_frame, s.stop_frame))
+            last_end = -1
+
+            for seg in group_segments:
+                new_start = max(seg.start_frame, last_end)
+                new_stop = seg.stop_frame
+
+                if new_start < new_stop and (new_stop - new_start) >= self.min_segment_duration:
+                    resolved.append(BehaviorSegment(
+                        video_id=seg.video_id,
+                        agent_id=seg.agent_id,
+                        target_id=seg.target_id,
+                        action=seg.action,
+                        start_frame=new_start,
+                        stop_frame=new_stop,
+                        confidence=seg.confidence,
+                    ))
+                    last_end = new_stop
+
+        return resolved
+
+    def _get_solution_df(self) -> Optional[pd.DataFrame]:
+        """Load or return cached solution DataFrame for Kaggle metric."""
+        if self._solution_df is not None:
+            return self._solution_df
+
+        if self.annotation_dir is None or self.metadata_csv is None:
+            return None
+
+        if not self.annotation_dir.exists() or not self.metadata_csv.exists():
+            return None
+
+        try:
+            metadata_df = pd.read_csv(self.metadata_csv)
+            all_rows = []
+
+            for _, meta in metadata_df.iterrows():
+                lab_id = meta['lab_id']
+                video_id = meta['video_id']
+                behaviors_labeled = meta.get('behaviors_labeled', '[]')
+
+                ann_path = self.annotation_dir / str(lab_id) / f"{video_id}.parquet"
+                if not ann_path.exists():
+                    continue
+
+                ann_df = pd.read_parquet(ann_path)
+                for _, row in ann_df.iterrows():
+                    agent_id = f"mouse{row['agent_id']}"
+                    target_id = f"mouse{row['target_id']}" if row['target_id'] != row['agent_id'] else "self"
+
+                    all_rows.append({
+                        'video_id': video_id,
+                        'agent_id': agent_id,
+                        'target_id': target_id,
+                        'action': row['action'],
+                        'start_frame': row['start_frame'],
+                        'stop_frame': row['stop_frame'],
+                        'lab_id': lab_id,
+                        'behaviors_labeled': behaviors_labeled,
+                    })
+
+            if all_rows:
+                self._solution_df = pd.DataFrame(all_rows)
+            return self._solution_df
+        except Exception as e:
+            print(f"[warn] Failed to load solution DataFrame: {e}")
+            return None
 
     def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict:
         """Test step."""

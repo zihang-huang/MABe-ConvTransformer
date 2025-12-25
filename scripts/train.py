@@ -162,11 +162,24 @@ def setup_callbacks(config: dict) -> list:
     """Set up training callbacks."""
     callbacks = []
 
+    # Determine which metric to use for checkpointing and early stopping
+    eval_config = config.get('evaluation', {})
+    use_segment_f1 = eval_config.get('segment_eval', True)
+
+    if use_segment_f1:
+        # Use Kaggle-compatible segment-level F1
+        monitor_metric = 'val/segment_f1'
+        filename_pattern = 'mabe-{epoch:02d}-{val_segment_f1:.4f}'
+    else:
+        # Use frame-level F1
+        monitor_metric = 'val/f1'
+        filename_pattern = 'mabe-{epoch:02d}-{val_f1:.4f}'
+
     # Checkpoint callback
     checkpoint_callback = ModelCheckpoint(
         dirpath=config['paths']['checkpoint_dir'],
-        filename='mabe-{epoch:02d}-{val_f1:.4f}',
-        monitor='val/f1',
+        filename=filename_pattern,
+        monitor=monitor_metric,
         mode='max',
         save_top_k=3,
         save_last=True
@@ -175,8 +188,13 @@ def setup_callbacks(config: dict) -> list:
 
     # Early stopping
     if config['training'].get('early_stopping'):
+        # Override monitor if using segment-level F1
+        early_stop_monitor = config['training']['early_stopping']['monitor']
+        if use_segment_f1 and early_stop_monitor == 'val/f1':
+            early_stop_monitor = 'val/segment_f1'
+
         early_stop = EarlyStopping(
-            monitor=config['training']['early_stopping']['monitor'],
+            monitor=early_stop_monitor,
             mode=config['training']['early_stopping']['mode'],
             patience=config['training']['early_stopping']['patience'],
             verbose=True
@@ -260,6 +278,9 @@ def main(config_path: str = None, ckpt_path: Optional[str] = None, **overrides):
     print(f"Initializing {config['model']['name']} model...")
 
     model_config = config['model'][config['model']['name']]
+    eval_config = config.get('evaluation', {})
+    data_dir = Path(config['paths']['data_dir'])
+
     model = BehaviorRecognitionModule(
         model_name=config['model']['name'],
         input_dim=data_module.feature_dim,
@@ -271,9 +292,17 @@ def main(config_path: str = None, ckpt_path: Optional[str] = None, **overrides):
         max_epochs=config['training']['max_epochs'],
         smoothing_weight=config['training']['loss']['smoothness_weight'],
         class_weights=class_weights,
-        eval_threshold=config.get('evaluation', {}).get('threshold', 0.5),
+        eval_threshold=eval_config.get('threshold', 0.5),
         use_focal_loss=config['training'].get('use_focal_loss', False),
         focal_gamma=config['training'].get('focal_gamma', 2.0),
+        # Segment-level evaluation settings for Kaggle metric
+        segment_eval=eval_config.get('segment_eval', True),
+        min_segment_duration=eval_config.get('min_duration', 5),
+        smoothing_kernel=eval_config.get('smoothing_kernel', 5),
+        nms_threshold=eval_config.get('nms_threshold', 0.3),
+        merge_gap=eval_config.get('merge_gap', 5),
+        annotation_dir=str(data_dir / 'train_annotation'),
+        metadata_csv=str(data_dir / 'train.csv'),
         **model_config
     )
 

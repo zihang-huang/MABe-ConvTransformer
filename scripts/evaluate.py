@@ -13,7 +13,7 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -49,6 +49,7 @@ from src.utils.postprocessing import (
     merge_segments,
     BehaviorSegment,
 )
+from src.utils.kaggle_metric import mouse_fbeta
 
 
 def load_config(config_path: Path, overrides: Dict = None) -> Dict:
@@ -308,6 +309,123 @@ def compute_metric_summary(
     return metrics, mcm, dominant_cm, class_report
 
 
+def build_solution_df(config: Dict, split: str) -> Optional[pd.DataFrame]:
+    """
+    Build solution DataFrame from annotation files for Kaggle-compatible evaluation.
+
+    Args:
+        config: Configuration dictionary with paths
+        split: Dataset split ('train', 'val', 'test')
+
+    Returns:
+        DataFrame with columns: video_id, agent_id, target_id, action,
+        start_frame, stop_frame, lab_id, behaviors_labeled
+        Returns None if annotations are not available.
+    """
+    data_dir = Path(config["paths"]["data_dir"])
+    ann_dir = data_dir / "train_annotation"
+    metadata_csv = data_dir / "train.csv"
+
+    if not ann_dir.exists() or not metadata_csv.exists():
+        return None
+
+    metadata_df = pd.read_csv(metadata_csv)
+
+    # Get video IDs for this split (we need to replicate the split logic)
+    # For simplicity, we use all videos in metadata - caller should filter if needed
+    all_rows = []
+
+    for _, meta in metadata_df.iterrows():
+        lab_id = meta["lab_id"]
+        video_id = meta["video_id"]
+        behaviors_labeled = meta.get("behaviors_labeled", "[]")
+
+        ann_path = ann_dir / str(lab_id) / f"{video_id}.parquet"
+        if not ann_path.exists():
+            continue
+
+        ann_df = pd.read_parquet(ann_path)
+        for _, row in ann_df.iterrows():
+            # Format agent/target as 'mouseX' to match submission format
+            agent_id = f"mouse{row['agent_id']}"
+            target_id = f"mouse{row['target_id']}" if row['target_id'] != row['agent_id'] else "self"
+
+            all_rows.append({
+                "video_id": video_id,
+                "agent_id": agent_id,
+                "target_id": target_id,
+                "action": row["action"],
+                "start_frame": row["start_frame"],
+                "stop_frame": row["stop_frame"],
+                "lab_id": lab_id,
+                "behaviors_labeled": behaviors_labeled,
+            })
+
+    if not all_rows:
+        return None
+
+    return pd.DataFrame(all_rows)
+
+
+def resolve_overlaps(segments: List[BehaviorSegment], min_duration: int = 5) -> List[BehaviorSegment]:
+    """
+    Resolve overlapping behaviors for the same agent-target pair.
+
+    When two behaviors overlap for the same (video_id, agent_id, target_id),
+    the latter behavior's start_frame is adjusted to begin right after the
+    previous behavior's stop_frame.
+
+    Args:
+        segments: List of BehaviorSegment objects
+        min_duration: Minimum duration for a valid segment
+
+    Returns:
+        List of BehaviorSegment objects with overlaps resolved
+    """
+    from collections import defaultdict
+
+    # Group segments by (video_id, agent_id, target_id)
+    groups = defaultdict(list)
+    for seg in segments:
+        key = (seg.video_id, seg.agent_id, seg.target_id)
+        groups[key].append(seg)
+
+    resolved_segments = []
+
+    for key, group_segments in groups.items():
+        # Sort by start_frame, then by stop_frame (to handle ties)
+        group_segments.sort(key=lambda s: (s.start_frame, s.stop_frame))
+
+        # Track the end of the last non-overlapping segment
+        last_end = -1
+
+        for seg in group_segments:
+            new_start = seg.start_frame
+            new_stop = seg.stop_frame
+
+            # If this segment overlaps with the previous one, adjust start
+            if new_start < last_end:
+                new_start = last_end
+
+            # Check if segment is still valid after adjustment
+            if new_start < new_stop and (new_stop - new_start) >= min_duration:
+                # Create a new segment with adjusted start
+                resolved_seg = BehaviorSegment(
+                    video_id=seg.video_id,
+                    agent_id=seg.agent_id,
+                    target_id=seg.target_id,
+                    action=seg.action,
+                    start_frame=new_start,
+                    stop_frame=new_stop,
+                    confidence=seg.confidence,
+                )
+                resolved_segments.append(resolved_seg)
+                last_end = new_stop
+            # If segment becomes invalid (too short or start >= stop), skip it
+
+    return resolved_segments
+
+
 def build_submission_rows(
     window_predictions: List[Dict],
     behaviors: List[str],
@@ -321,7 +439,7 @@ def build_submission_rows(
     Convert window-level predictions into submission-format rows.
     """
     aggregated = aggregate_window_predictions(window_predictions, overlap_strategy="average")
-    all_segments: Dict[Tuple[int, Any, Any], List[BehaviorSegment]] = {}
+    all_segments: List[BehaviorSegment] = []
 
     for (video_id, agent_id, target_id), frame_probs in aggregated.items():
         raw_segments = extract_segments(
@@ -334,21 +452,40 @@ def build_submission_rows(
         merged = merge_segments(raw_segments, gap_threshold=merge_gap)
         final_segments = apply_nms(merged, iou_threshold=nms_threshold)
 
-        segment_objects = [
-            BehaviorSegment(
+        # Format agent_id and target_id as strings (e.g., "mouse1", "mouse2", "self")
+        formatted_agent = _format_mouse_id(agent_id, allow_self=False)
+        formatted_target = _format_mouse_id(target_id, allow_self=True)
+
+        for behavior, start, stop, conf in final_segments:
+            all_segments.append(BehaviorSegment(
                 video_id=int(_to_scalar(video_id)),
-                agent_id=_format_mouse_id(agent_id, allow_self=False),
-                target_id=_format_mouse_id(target_id, allow_self=True),
+                agent_id=formatted_agent,
+                target_id=formatted_target,
                 action=behavior,
                 start_frame=int(start),
                 stop_frame=int(stop),
                 confidence=float(conf),
-            )
-            for behavior, start, stop, conf in final_segments
-        ]
-        all_segments[(video_id, agent_id, target_id)] = segment_objects
+            ))
 
-    return create_submission(all_segments, min_duration=min_duration)
+    # Resolve overlapping behaviors for the same agent-target pair
+    all_segments = resolve_overlaps(all_segments, min_duration=min_duration)
+
+    # Sort and build rows directly from segments (not using create_submission)
+    all_segments.sort(key=lambda s: (s.video_id, s.agent_id, s.target_id, s.start_frame))
+    rows = []
+    for row_id, seg in enumerate(all_segments):
+        if seg.duration >= min_duration and seg.start_frame < seg.stop_frame:
+            rows.append({
+                'row_id': row_id,
+                'video_id': seg.video_id,
+                'agent_id': seg.agent_id,  # Now uses formatted string from segment
+                'target_id': seg.target_id,  # Now uses formatted string from segment
+                'action': seg.action,
+                'start_frame': seg.start_frame,
+                'stop_frame': seg.stop_frame,
+            })
+
+    return rows
 
 
 def plot_per_class_confusion(conf_matrix: np.ndarray, behaviors: List[str], output_path: Path):
@@ -579,6 +716,50 @@ def main():
         )
         submission_df.to_csv(submission_path, index=False)
         print(f"[predictions] Submission-format predictions saved to {submission_path}")
+
+        # Compute Kaggle-compatible segment-level F1 metric
+        print("[kaggle] Computing Kaggle-compatible segment-level F1...")
+        solution_df = build_solution_df(config, args.split)
+        if solution_df is not None:
+            print(f"[kaggle] Solution has {len(solution_df)} rows, {solution_df['video_id'].nunique()} videos")
+            print(f"[kaggle] Submission has {len(submission_df)} rows, {submission_df['video_id'].nunique()} videos")
+
+            # Debug: show sample video_ids and their types
+            sol_videos = solution_df["video_id"].unique()[:5]
+            sub_videos = submission_df["video_id"].unique()[:5]
+            print(f"[kaggle] Solution video_ids (sample): {sol_videos} (type: {type(sol_videos[0]) if len(sol_videos) > 0 else 'N/A'})")
+            print(f"[kaggle] Submission video_ids (sample): {sub_videos} (type: {type(sub_videos[0]) if len(sub_videos) > 0 else 'N/A'})")
+
+            # Ensure consistent types for video_id
+            solution_df["video_id"] = solution_df["video_id"].astype(int)
+            submission_df["video_id"] = submission_df["video_id"].astype(int)
+
+            # Filter solution to videos that are in the submission
+            submission_videos = set(submission_df["video_id"].unique())
+            solution_df = solution_df[solution_df["video_id"].isin(submission_videos)]
+            print(f"[kaggle] After filtering: {len(solution_df)} solution rows for {len(submission_videos)} submission videos")
+
+            if len(solution_df) > 0 and len(submission_df) > 0:
+                # Debug: show sample rows
+                print(f"[kaggle] Sample solution row: {solution_df.iloc[0].to_dict() if len(solution_df) > 0 else 'N/A'}")
+                print(f"[kaggle] Sample submission row: {submission_df.iloc[0].to_dict() if len(submission_df) > 0 else 'N/A'}")
+
+                try:
+                    kaggle_f1 = mouse_fbeta(solution_df, submission_df, beta=1.0)
+                    print(f"[kaggle] Segment-level F1 (Kaggle metric): {kaggle_f1:.4f}")
+
+                    # Save to metrics
+                    metrics["kaggle_f1"] = kaggle_f1
+                    with open(run_dir / "metrics.json", "w") as f:
+                        json.dump(metrics, f, indent=2)
+                except Exception as e:
+                    import traceback
+                    print(f"[kaggle] Failed to compute Kaggle metric: {e}")
+                    traceback.print_exc()
+            else:
+                print("[kaggle] No matching videos between solution and submission")
+        else:
+            print("[kaggle] Could not load solution data for Kaggle metric")
 
     print(f"[done] Metrics and plots written to {run_dir}")
     print(f"macro F1: {metrics['macro_f1']:.4f} | micro F1: {metrics['micro_f1']:.4f}")

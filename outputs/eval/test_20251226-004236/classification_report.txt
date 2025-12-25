@@ -1,0 +1,44 @@
+                 precision    recall  f1-score   support
+
+     biteobject       0.00      0.00      0.00       307
+          climb       0.72      0.68      0.70      7599
+            dig       0.54      0.70      0.61     10082
+  exploreobject       0.00      0.00      0.00       334
+         freeze       0.00      0.00      0.00         0
+   genitalgroom       0.34      0.80      0.48       685
+         huddle       0.00      0.00      0.00        99
+           rear       0.42      0.14      0.21     14715
+           rest       0.00      0.00      0.00         0
+            run       0.00      0.00      0.00         0
+      selfgroom       0.40      0.37      0.38      2665
+      allogroom       0.00      0.00      0.00        26
+       approach       0.59      0.31      0.40      7600
+         attack       0.77      0.62      0.68     33434
+   attemptmount       0.00      0.00      0.00       512
+          avoid       0.35      0.58      0.44       663
+          chase       0.47      0.19      0.27      2083
+    chaseattack       0.00      0.00      0.00         0
+         defend       0.55      0.04      0.07      3212
+      disengage       0.00      0.00      0.00         0
+      dominance       0.40      0.88      0.55      2840
+ dominancegroom       0.92      0.05      0.09       487
+ dominancemount       0.17      0.04      0.07      3483
+      ejaculate       0.00      0.00      0.00         0
+         escape       0.63      0.39      0.48      3894
+         flinch       0.00      0.00      0.00       265
+         follow       0.57      0.40      0.47      2897
+       intromit       0.64      0.82      0.72     23725
+          mount       0.41      0.49      0.44     13068
+reciprocalsniff       0.00      0.00      0.00      1112
+       shepherd       0.80      0.69      0.74      6971
+          sniff       0.56      0.60      0.58    181579
+      sniffbody       0.39      0.32      0.35     16354
+      sniffface       0.34      0.27      0.30      9455
+   sniffgenital       0.40      0.32      0.36     97906
+         submit       0.00      0.00      0.00       302
+         tussle       0.00      0.00      0.00         0
+
+      micro avg       0.53      0.50      0.51    448354
+      macro avg       0.31      0.26      0.25    448354
+   weighted avg       0.52      0.50      0.50    448354
+    samples avg       0.18      0.18      0.18    448354
