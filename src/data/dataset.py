@@ -664,6 +664,9 @@ class MABeDataModule(pl.LightningDataModule):
         oversample_rare: bool = False,
         rare_behaviors: Optional[List[str]] = None,
         oversample_factor: int = 10,
+        # Shard cache settings for precomputed data
+        shard_cache_size: int = 8,
+        preload_shards: bool = False,
         # Engineered feature settings
         use_engineered_features: bool = False,
         feature_config: Optional[Dict] = None
@@ -689,6 +692,9 @@ class MABeDataModule(pl.LightningDataModule):
         self.oversample_rare = oversample_rare
         self.rare_behaviors = rare_behaviors or ['submit', 'chaseattack']
         self.oversample_factor = oversample_factor
+        # Shard cache settings
+        self.shard_cache_size = shard_cache_size
+        self.preload_shards = preload_shards
         # Engineered feature settings
         self.use_engineered_features = use_engineered_features
         self.feature_config = feature_config or {}
@@ -733,18 +739,24 @@ class MABeDataModule(pl.LightningDataModule):
                             apply_augment=True,
                             oversample_rare=self.oversample_rare,
                             rare_behaviors=self.rare_behaviors,
-                            oversample_factor=self.oversample_factor
+                            oversample_factor=self.oversample_factor,
+                            shard_cache_size=self.shard_cache_size,
+                            preload_all=self.preload_shards
                         )
                         self.val_dataset = PrecomputedWindowDataset(
                             root=self.precomputed_dir,
                             split='val',
-                            apply_augment=False
+                            apply_augment=False,
+                            shard_cache_size=self.shard_cache_size,
+                            preload_all=self.preload_shards
                         )
                         if self.enable_test_split and self.test_split > 0 and pretest_manifest.exists():
                             self.test_dataset = PrecomputedWindowDataset(
                                 root=self.precomputed_dir,
                                 split='test',
-                                apply_augment=False
+                                apply_augment=False,
+                                shard_cache_size=self.shard_cache_size,
+                                preload_all=self.preload_shards
                             )
                         self.behaviors = self.train_dataset.behaviors
                         # Behaviors provided by manifest; skip raw loading.
@@ -828,7 +840,9 @@ class MABeDataModule(pl.LightningDataModule):
                         self.test_dataset = PrecomputedWindowDataset(
                             root=self.precomputed_dir,
                             split='test',
-                            apply_augment=False
+                            apply_augment=False,
+                            shard_cache_size=self.shard_cache_size,
+                            preload_all=self.preload_shards
                         )
                         return
                     except ValueError as e:
@@ -966,24 +980,29 @@ class MABeDataModule(pl.LightningDataModule):
         return train_split, val_split, None
 
     def train_dataloader(self) -> DataLoader:
+        import sys
+        # Disable pin_memory on Windows to avoid shared memory issues
+        use_pin_memory = sys.platform != 'win32' and self.num_workers > 0
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
-            pin_memory=True,
+            pin_memory=use_pin_memory,
             prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             persistent_workers=self.num_workers > 0,
             drop_last=True
         )
 
     def val_dataloader(self) -> DataLoader:
+        import sys
+        use_pin_memory = sys.platform != 'win32' and self.num_workers > 0
         return DataLoader(
             self.val_dataset,
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            pin_memory=True,
+            pin_memory=use_pin_memory,
             prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             persistent_workers=self.num_workers > 0
         )
@@ -991,12 +1010,14 @@ class MABeDataModule(pl.LightningDataModule):
     def test_dataloader(self) -> DataLoader:
         if self.test_dataset is None:
             return None
+        import sys
+        use_pin_memory = sys.platform != 'win32' and self.num_workers > 0
         return DataLoader(
             self.test_dataset,
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            pin_memory=True,
+            pin_memory=use_pin_memory,
             prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             persistent_workers=self.num_workers > 0
         )
@@ -1024,6 +1045,7 @@ class PrecomputedWindowDataset(Dataset):
     Dataset for loading precomputed windows stored as sharded torch files.
 
     Supports oversampling of rare behaviors to address class imbalance.
+    Uses lazy loading with LRU cache to avoid loading all shards into memory.
     """
 
     def __init__(
@@ -1033,7 +1055,9 @@ class PrecomputedWindowDataset(Dataset):
         apply_augment: bool = False,
         oversample_rare: bool = False,
         rare_behaviors: Optional[List[str]] = None,
-        oversample_factor: int = 10
+        oversample_factor: int = 10,
+        shard_cache_size: int = 8,
+        preload_all: bool = False
     ):
         """
         Args:
@@ -1043,6 +1067,8 @@ class PrecomputedWindowDataset(Dataset):
             oversample_rare: Whether to oversample windows containing rare behaviors
             rare_behaviors: List of behavior names to oversample (default: submit, chaseattack)
             oversample_factor: How many times to repeat rare behavior windows
+            shard_cache_size: Number of shards to keep in memory (LRU cache)
+            preload_all: If True, load all shards into memory (legacy behavior)
         """
         super().__init__()
         self.root = Path(root)
@@ -1051,6 +1077,8 @@ class PrecomputedWindowDataset(Dataset):
         self.oversample_rare = oversample_rare and split == 'train'  # Only oversample training
         self.rare_behaviors = rare_behaviors or ['submit', 'chaseattack']
         self.oversample_factor = oversample_factor
+        self.shard_cache_size = max(1, shard_cache_size)
+        self.preload_all = preload_all
 
         manifest_path = self.root / split / 'manifest.json'
         if not manifest_path.exists():
@@ -1072,14 +1100,10 @@ class PrecomputedWindowDataset(Dataset):
             )
         self.shards = manifest['shards']
 
-        # Load all shards into memory up front to avoid disk I/O during training.
-        self.shards_data: List[Dict[str, Any]] = []
-        for shard_info in self.shards:
-            shard_path = self.root / self.split / shard_info['path']
-            shard = torch.load(shard_path, map_location='cpu')
-            self.shards_data.append(shard)
+        # LRU cache for shards: OrderedDict with shard_idx -> shard_data
+        self._shard_cache: OrderedDict = OrderedDict()
 
-        # Build cumulative counts for original indexing
+        # Build cumulative counts for indexing
         self._cum_counts = []
         total = 0
         for shard in self.shards:
@@ -1088,19 +1112,29 @@ class PrecomputedWindowDataset(Dataset):
 
         self._base_length = self._cum_counts[-1] if self._cum_counts else 0
 
+        # For backwards compatibility: optionally preload all shards
+        self.shards_data: Optional[List[Dict[str, Any]]] = None
+        if self.preload_all:
+            self.shards_data = []
+            for shard_info in self.shards:
+                shard_path = self.root / self.split / shard_info['path']
+                shard = torch.load(shard_path, map_location='cpu')
+                self.shards_data.append(shard)
+            print(f"[data] Preloaded all {len(self.shards_data)} shards for {split} into memory.")
+
         # Build oversampled index if enabled
         self._oversampled_indices: Optional[List[int]] = None
-        if self.oversample_rare and self.shards_data:
+        if self.oversample_rare:
             self._build_oversampled_indices()
 
-        if self.shards_data:
-            total_samples = sum(s['num_samples'] for s in self.shards)
-            effective_samples = len(self)
-            if self._oversampled_indices:
-                print(f"[data] Loaded {len(self.shards_data)} precomputed shards for {split} "
-                      f"({total_samples} samples, {effective_samples} after oversampling).")
-            else:
-                print(f"[data] Loaded {len(self.shards_data)} precomputed shards for {split} into memory ({total_samples} samples).")
+        total_samples = sum(s['num_samples'] for s in self.shards)
+        effective_samples = len(self)
+        if self._oversampled_indices:
+            print(f"[data] {split}: {total_samples} samples ({effective_samples} after oversampling), "
+                  f"{len(self.shards)} shards, cache_size={self.shard_cache_size}")
+        else:
+            print(f"[data] {split}: {total_samples} samples, {len(self.shards)} shards, "
+                  f"cache_size={self.shard_cache_size}")
 
     def _build_oversampled_indices(self):
         """Build expanded index list that includes duplicates for rare behavior samples."""
@@ -1114,6 +1148,8 @@ class PrecomputedWindowDataset(Dataset):
             print(f"[data] Warning: No rare behaviors found in {self.behaviors}")
             return
 
+        print(f"[data] Scanning shards to build oversampling indices...")
+
         # Build expanded index list
         indices = []
         rare_count = 0
@@ -1121,7 +1157,7 @@ class PrecomputedWindowDataset(Dataset):
 
         for global_idx in range(self._base_length):
             shard_idx, local_idx = self._locate_shard_base(global_idx)
-            shard = self.shards_data[shard_idx]
+            shard = self._load_shard(shard_idx)  # Uses LRU cache
             labels = shard['labels'][local_idx]
 
             # Check if this window contains any rare behavior
@@ -1199,4 +1235,28 @@ class PrecomputedWindowDataset(Dataset):
         return self._locate_shard_base(idx)
 
     def _load_shard(self, shard_idx: int) -> Dict[str, Any]:
-        return self.shards_data[shard_idx]
+        """Load a shard with LRU caching."""
+        # If all shards are preloaded, use them directly
+        if self.shards_data is not None:
+            return self.shards_data[shard_idx]
+
+        # Check LRU cache
+        if shard_idx in self._shard_cache:
+            # Move to end (most recently used)
+            self._shard_cache.move_to_end(shard_idx)
+            return self._shard_cache[shard_idx]
+
+        # Load shard from disk
+        shard_info = self.shards[shard_idx]
+        shard_path = self.root / self.split / shard_info['path']
+        shard = torch.load(shard_path, map_location='cpu')
+
+        # Add to cache
+        self._shard_cache[shard_idx] = shard
+        self._shard_cache.move_to_end(shard_idx)
+
+        # Evict oldest if cache is full
+        while len(self._shard_cache) > self.shard_cache_size:
+            self._shard_cache.popitem(last=False)
+
+        return shard

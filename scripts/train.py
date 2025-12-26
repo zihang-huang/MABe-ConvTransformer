@@ -302,6 +302,9 @@ def main(config_path: str = None, ckpt_path: Optional[str] = None, **overrides):
         oversample_rare=config['data'].get('oversample_rare', False),
         rare_behaviors=config['data'].get('rare_behaviors', ['submit', 'chaseattack']),
         oversample_factor=config['data'].get('oversample_factor', 10),
+        # Shard cache settings (memory optimization for precomputed data)
+        shard_cache_size=config['data'].get('shard_cache_size', 8),
+        preload_shards=config['data'].get('preload_shards', False),
         # Engineered features
         use_engineered_features=use_engineered,
         feature_config=feature_config

@@ -98,9 +98,9 @@ class PairwiseFeatureExtractor:
         features['approach_speed'] = approach_speed
 
         # Tangential velocity component
-        tangent_speed = np.sqrt(
-            np.sum(rel_velocity ** 2, axis=-1) - approach_speed ** 2 + 1e-8
-        )
+        # Use np.maximum to handle floating point precision issues where the value can be slightly negative
+        tangent_speed_sq = np.sum(rel_velocity ** 2, axis=-1) - approach_speed ** 2
+        tangent_speed = np.sqrt(np.maximum(0, tangent_speed_sq))
         features['tangent_speed'] = tangent_speed
 
         # Body orientation-based features

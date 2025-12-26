@@ -98,6 +98,8 @@ def prepare_dataloader(config: Dict, split: str) -> Tuple[DataLoader, List[str]]
         annotation_cache_size=config["data"].get("annotation_cache_size", 8),
         use_precomputed=config["data"].get("use_precomputed", False),
         precomputed_dir=config["data"].get("precomputed_dir", None),
+        # Shard cache settings (memory optimization)
+        shard_cache_size=config["data"].get("shard_cache_size", 8),
         # Engineered features
         use_engineered_features=use_engineered,
         feature_config=feature_config

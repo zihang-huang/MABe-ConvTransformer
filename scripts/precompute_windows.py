@@ -65,7 +65,8 @@ def process_split(
     name: str,
     dataset,
     out_root: Path,
-    shard_size: int
+    shard_size: int,
+    min_label_frames: int = 0
 ):
     if dataset is None or len(dataset) == 0:
         print(f"[skip] No samples for split '{name}'.")
@@ -99,8 +100,23 @@ def process_split(
     }
 
     shard_idx = 0
-    for idx in range(len(dataset)):
+    skipped = 0
+    total = len(dataset)
+
+    for idx in range(total):
+        if idx % 1000 == 0:
+            print(f"  [{name}] Processing {idx}/{total} (skipped: {skipped})...", end="\r")
+
         sample = dataset[idx]
+        labels = sample["labels"]
+
+        # Skip windows with too few labeled frames
+        if min_label_frames > 0:
+            label_coverage = (labels.sum(dim=-1) > 0).sum().item()
+            if label_coverage < min_label_frames:
+                skipped += 1
+                continue
+
         buffer["features"].append(sample["features"].half().cpu())
         buffer["labels"].append(sample["labels"].half().cpu())
         buffer["valid_mask"].append(sample["valid_mask"].to(torch.uint8).cpu())
@@ -115,8 +131,12 @@ def process_split(
             flush_shard(split_dir, shard_idx, buffer, manifest)
             shard_idx += 1
 
+    print()  # Clear progress line
     # Flush remainder
     flush_shard(split_dir, shard_idx, buffer, manifest)
+
+    if skipped > 0:
+        print(f"  [{name}] Skipped {skipped}/{total} windows with < {min_label_frames} labeled frames")
 
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
@@ -130,6 +150,9 @@ def main():
     parser.add_argument("--config", type=str, default="configs/config.yaml", help="Path to config.")
     parser.add_argument("--output_dir", type=str, help="Override precomputed output directory.")
     parser.add_argument("--shard_size", type=int, default=512, help="Number of samples per shard file.")
+    parser.add_argument("--stride", type=int, help="Override stride (higher = fewer windows, less overlap).")
+    parser.add_argument("--min_label_frames", type=int, default=0,
+                        help="Skip windows with fewer than N labeled frames (e.g., 30 to require ~1sec of labels).")
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -137,6 +160,11 @@ def main():
 
     out_dir = Path(args.output_dir) if args.output_dir else Path(config["data"].get("precomputed_dir", "precomputed"))
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Override stride if specified
+    stride = args.stride if args.stride else config["data"]["stride"]
+    window_size = config["data"]["window_size"]
+    print(f"[info] Window size: {window_size}, Stride: {stride} (overlap: {max(0, window_size - stride)} frames)")
 
     # Build feature configuration from config
     features_cfg = config.get('features', {})
@@ -162,8 +190,8 @@ def main():
         behaviors=config.get("behaviors", None),
         batch_size=config["training"]["batch_size"],
         num_workers=config["training"]["num_workers"],
-        window_size=config["data"]["window_size"],
-        stride=config["data"]["stride"],
+        window_size=window_size,
+        stride=stride,
         target_fps=config["data"]["target_fps"],
         val_split=config["data"].get("val_split", 0.2),
         test_split=config["data"].get("test_split", 0),
@@ -177,12 +205,12 @@ def main():
 
     # Build splits using the existing logic
     dm.setup(stage="fit", use_precomputed=False)
-    process_split("train", dm.train_dataset, out_dir, args.shard_size)
-    process_split("val", dm.val_dataset, out_dir, args.shard_size)
+    process_split("train", dm.train_dataset, out_dir, args.shard_size, args.min_label_frames)
+    process_split("val", dm.val_dataset, out_dir, args.shard_size, args.min_label_frames)
 
     if dm.enable_test_split and dm.test_split > 0:
         dm.setup(stage="test", use_precomputed=False)
-        process_split("test", dm.test_dataset, out_dir, args.shard_size)
+        process_split("test", dm.test_dataset, out_dir, args.shard_size, args.min_label_frames)
     else:
         print("[skip] Test split disabled; not precomputing test shards.")
 
