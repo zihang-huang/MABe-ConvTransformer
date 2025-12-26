@@ -70,6 +70,19 @@ def prepare_dataloader(config: Dict, split: str) -> Tuple[DataLoader, List[str]]
     if split not in ("train", "val", "test"):
         raise ValueError("Only 'train', 'val', and 'test' splits are supported for evaluation.")
 
+    # Build feature configuration from config
+    features_cfg = config.get('features', {})
+    use_engineered = features_cfg.get('use_engineered_features', False)
+    feature_config = {
+        'use_raw_coords': features_cfg.get('use_raw_coords', True),
+        'use_single_mouse': features_cfg.get('use_single_mouse', True),
+        'use_pairwise': features_cfg.get('use_pairwise', True),
+        'use_temporal': features_cfg.get('use_temporal', True),
+        'temporal_windows': features_cfg.get('temporal_windows', [5, 15, 30, 60]),
+        'single_mouse': features_cfg.get('single_mouse', {}),
+        'pair': features_cfg.get('pair', {})
+    }
+
     dm = MABeDataModule(
         data_dir=config["paths"]["data_dir"],
         behaviors=config.get("behaviors", None),
@@ -80,10 +93,14 @@ def prepare_dataloader(config: Dict, split: str) -> Tuple[DataLoader, List[str]]
         target_fps=config["data"]["target_fps"],
         val_split=config["data"].get("val_split", 0.2),
         test_split=config["data"].get("test_split", 0.1),
+        enable_test_split=config["data"].get("enable_test_split", True),
         tracking_cache_size=config["data"].get("tracking_cache_size", 4),
         annotation_cache_size=config["data"].get("annotation_cache_size", 8),
         use_precomputed=config["data"].get("use_precomputed", False),
         precomputed_dir=config["data"].get("precomputed_dir", None),
+        # Engineered features
+        use_engineered_features=use_engineered,
+        feature_config=feature_config
     )
 
     dm.setup(
@@ -105,6 +122,8 @@ def prepare_dataloader(config: Dict, split: str) -> Tuple[DataLoader, List[str]]
             dataset.apply_augment = False
 
     if dataset is None:
+        if split == "test" and (not dm.enable_test_split or dm.test_split <= 0):
+            raise ValueError("Test split is disabled; set data.enable_test_split=true and a positive data.test_split to enable.")
         raise ValueError(f"No dataset found for split '{split}'.")
 
     # Guardrail: ensure annotations exist so we never evaluate on unlabeled/test data.

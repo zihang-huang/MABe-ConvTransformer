@@ -18,11 +18,21 @@ data:
   stride: 256  # sliding window stride
   val_split: 0.2   # fraction of data for validation
   test_split: 0  # fraction of data for held-out test
+  enable_test_split: false  # When false, skip creating a held-out test split (train/val only)
   min_segment_duration: 5  # minimum frames for valid segment
   tracking_cache_size: 2
   annotation_cache_size: 4
   use_precomputed: true  # When true, load precomputed shards instead of raw parquet
   precomputed_dir: ${paths.data_dir}/precomputed  # Output location for precompute script
+
+  # Rare behavior oversampling (for class imbalance)
+  oversample_rare: true  # Oversample windows containing rare behaviors
+  rare_behaviors:  # Behaviors to oversample (test-relevant rare classes)
+    - submit       # Only 86 training examples
+    - chaseattack  # Only 57 training examples
+    - ejaculate
+    - intromit
+  oversample_factor: 10  # How many times to repeat rare behavior windows
 
   # Body parts (common across labs)
   core_body_parts:
@@ -89,6 +99,15 @@ behaviors:
 
 # Feature settings
 features:
+  # Master toggle for engineered features
+  use_engineered_features: true  # Enable velocity, acceleration, pairwise, temporal features
+
+  # Feature type toggles
+  use_raw_coords: true      # Include raw keypoint coordinates
+  use_single_mouse: true    # Include single mouse features (velocity, acceleration, etc.)
+  use_pairwise: true        # Include pairwise interaction features
+  use_temporal: true        # Include temporal rolling statistics
+
   # Temporal windows for rolling statistics
   temporal_windows: [5, 15, 30, 60]  # frames
 
@@ -134,10 +153,10 @@ model:
 
 # Training settings
 training:
-  batch_size: 512
+  batch_size: 256
   num_workers: 8
   max_epochs: 1000
-  learning_rate: 0.0032  # Scaled roughly linearly for 32x larger batch
+  learning_rate: 0.001  # Scaled roughly linearly for 32x larger batch
   weight_decay: 0.0003  # Extra regularization to offset low gradient noise at large batch
   prefetch_factor: 8
 
@@ -155,15 +174,15 @@ training:
 
   # Class imbalance handling
   # Use 'none' with focal loss instead - more stable than pos_weight for extreme imbalance
-  class_weighting: none  # Options: inverse, effective_num, pos_neg_ratio, none
+  class_weighting: pos_neg_ratio  # Options: inverse, effective_num, pos_neg_ratio, none
   effective_num_beta: 0.9999
   use_focal_loss: true  # Use focal loss to handle class imbalance without pos_weight
-  focal_gamma: 2.0  # Focus on hard examples
+  focal_gamma: 1.5  # Focus on hard examples
 
   # Early stopping
   early_stopping:
     patience: 150  # More epochs to allow comparable update count with larger batches
-    monitor: val/f1
+    monitor: val_segment_f1
     mode: max
 
 # Domain adaptation
@@ -174,7 +193,7 @@ domain_adaptation:
 
 # Evaluation
 evaluation:
-  threshold: 0.39
+  threshold: 0.30
   min_duration: 5
   smoothing_kernel: 5
   nms_threshold: 0.3

@@ -194,6 +194,12 @@ class TransformerEncoder(nn.Module):
         if mask is not None:
             # TransformerEncoder expects True for masked positions
             attn_mask = (mask == 0)
+            # Prevent NaN: if all positions are masked, unmask the first position
+            # This avoids softmax over all -inf values which produces NaN
+            all_masked = attn_mask.all(dim=1)
+            if all_masked.any():
+                attn_mask = attn_mask.clone()
+                attn_mask[all_masked, 0] = False
         else:
             attn_mask = None
 
@@ -258,6 +264,11 @@ class PairwiseInteractionModule(nn.Module):
         attn_mask = None
         if mask is not None:
             attn_mask = (mask == 0)
+            # Prevent NaN: if all positions are masked, unmask the first position
+            all_masked = attn_mask.all(dim=1)
+            if all_masked.any():
+                attn_mask = attn_mask.clone()
+                attn_mask[all_masked, 0] = False
 
         attended, _ = self.cross_attention(
             agent_h, target_h, target_h,
@@ -424,13 +435,17 @@ class TCNTransformerLoss(nn.Module):
         num_classes: int,
         smoothing_weight: float = 0.1,
         class_weights: Optional[torch.Tensor] = None,
-        multi_label: bool = True
+        multi_label: bool = True,
+        use_focal_loss: bool = False,
+        focal_gamma: float = 2.0
     ):
         super().__init__()
 
         self.num_classes = num_classes
         self.smoothing_weight = smoothing_weight
         self.multi_label = multi_label
+        self.use_focal_loss = use_focal_loss
+        self.focal_gamma = focal_gamma
 
         if class_weights is not None:
             class_weights = class_weights.float()
@@ -460,18 +475,35 @@ class TCNTransformerLoss(nn.Module):
 
         # Classification loss
         if self.multi_label or targets.dim() == 3:
-            # Binary cross entropy for multi-label
-            pos_weight = self.class_weights if self.class_weights is not None else None
             # Clamp predictions to prevent numerical instability
             predictions_clamped = torch.clamp(predictions, -20.0, 20.0)
-            cls_loss = F.binary_cross_entropy_with_logits(
-                predictions_clamped, targets.float(),
-                reduction='none',
-                pos_weight=pos_weight
-            )
-            # Clamp loss values to prevent gradient explosion
-            cls_loss = torch.clamp(cls_loss, 0.0, 100.0)
-            cls_loss = cls_loss.mean(dim=-1)
+
+            if self.use_focal_loss:
+                # Focal loss for multi-label classification
+                # Compute BCE loss without reduction
+                bce_loss = F.binary_cross_entropy_with_logits(
+                    predictions_clamped, targets.float(),
+                    reduction='none'
+                )
+                # Compute focal weight: (1 - p_t)^gamma
+                probs = torch.sigmoid(predictions_clamped)
+                p_t = probs * targets + (1 - probs) * (1 - targets)
+                focal_weight = (1 - p_t) ** self.focal_gamma
+                cls_loss = focal_weight * bce_loss
+                # Clamp to prevent extreme values
+                cls_loss = torch.clamp(cls_loss, 0.0, 100.0)
+                cls_loss = cls_loss.mean(dim=-1)
+            else:
+                # Standard BCE loss
+                pos_weight = self.class_weights if self.class_weights is not None else None
+                cls_loss = F.binary_cross_entropy_with_logits(
+                    predictions_clamped, targets.float(),
+                    reduction='none',
+                    pos_weight=pos_weight
+                )
+                # Clamp loss values to prevent gradient explosion
+                cls_loss = torch.clamp(cls_loss, 0.0, 100.0)
+                cls_loss = cls_loss.mean(dim=-1)
         else:
             # Cross entropy for single-label
             batch, seq_len, num_cls = predictions.shape

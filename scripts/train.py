@@ -154,7 +154,25 @@ def build_class_weights(train_dataset, target_fps: float, weighting: str, beta: 
         return None
 
     weights = compute_class_weights(counts, method=weighting, beta=beta, is_counts=True, total_samples=total_samples)
+
+    # Validate weights - check for NaN or Inf values
+    if not torch.isfinite(weights).all():
+        nan_indices = torch.where(~torch.isfinite(weights))[0].tolist()
+        print(f"[error] Non-finite class weights detected at indices: {nan_indices}")
+        print(f"[error] Class counts at these indices: {counts[nan_indices]}")
+        print(f"[warn] Replacing non-finite weights with 1.0")
+        weights = torch.where(torch.isfinite(weights), weights, torch.ones_like(weights))
+
     print(f"[info] Class weights computed (min={weights.min().item():.4f}, max={weights.max().item():.4f})")
+
+    # Log per-class weights for rare classes (count < 100)
+    rare_mask = counts < 100
+    if rare_mask.any():
+        rare_indices = np.where(rare_mask)[0]
+        print(f"[info] Rare class weights (count < 100):")
+        for idx in rare_indices:
+            print(f"  [{idx}] count={counts[idx]:.0f}, weight={weights[idx].item():.4f}")
+
     return weights
 
 
@@ -245,6 +263,26 @@ def main(config_path: str = None, ckpt_path: Optional[str] = None, **overrides):
 
     # Initialize data module
     print("Initializing data module...")
+
+    # Build feature configuration from config
+    features_cfg = config.get('features', {})
+    use_engineered = features_cfg.get('use_engineered_features', False)
+    feature_config = {
+        'use_raw_coords': features_cfg.get('use_raw_coords', True),
+        'use_single_mouse': features_cfg.get('use_single_mouse', True),
+        'use_pairwise': features_cfg.get('use_pairwise', True),
+        'use_temporal': features_cfg.get('use_temporal', True),
+        'temporal_windows': features_cfg.get('temporal_windows', [5, 15, 30, 60]),
+        'single_mouse': features_cfg.get('single_mouse', {}),
+        'pair': features_cfg.get('pair', {})
+    }
+
+    if use_engineered:
+        print(f"[info] Engineered features enabled: raw_coords={feature_config['use_raw_coords']}, "
+              f"single_mouse={feature_config['use_single_mouse']}, "
+              f"pairwise={feature_config['use_pairwise']}, "
+              f"temporal={feature_config['use_temporal']}")
+
     data_module = MABeDataModule(
         data_dir=config['paths']['data_dir'],
         batch_size=config['training']['batch_size'],
@@ -254,11 +292,19 @@ def main(config_path: str = None, ckpt_path: Optional[str] = None, **overrides):
         target_fps=config['data']['target_fps'],
         val_split=config['data'].get('val_split', 0.2),
         test_split=config['data'].get('test_split', 0.1),
+        enable_test_split=config['data'].get('enable_test_split', True),
         prefetch_factor=config['training'].get('prefetch_factor', 4),
         tracking_cache_size=config['data'].get('tracking_cache_size', 4),
         annotation_cache_size=config['data'].get('annotation_cache_size', 8),
         use_precomputed=config['data'].get('use_precomputed', False),
-        precomputed_dir=config['data'].get('precomputed_dir')
+        precomputed_dir=config['data'].get('precomputed_dir'),
+        # Oversampling for rare behaviors
+        oversample_rare=config['data'].get('oversample_rare', False),
+        rare_behaviors=config['data'].get('rare_behaviors', ['submit', 'chaseattack']),
+        oversample_factor=config['data'].get('oversample_factor', 10),
+        # Engineered features
+        use_engineered_features=use_engineered,
+        feature_config=feature_config
     )
 
     # Setup data to get dimensions

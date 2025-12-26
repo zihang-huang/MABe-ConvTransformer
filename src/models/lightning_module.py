@@ -113,7 +113,9 @@ class BehaviorRecognitionModule(pl.LightningModule):
             self.criterion = TCNTransformerLoss(
                 num_classes=num_classes,
                 smoothing_weight=smoothing_weight,
-                class_weights=class_weights
+                class_weights=class_weights,
+                use_focal_loss=use_focal_loss,
+                focal_gamma=focal_gamma
             )
         else:
             raise ValueError(f"Unknown model: {model_name}")
@@ -681,10 +683,17 @@ def compute_class_weights(
         if total_samples is None:
             # Estimate total samples from max count (assume at least one class has all positives)
             total_samples = max(safe_counts.max() * 2, safe_counts.sum())
-        neg_counts = total_samples - safe_counts
+
+        # Ensure neg_counts is always positive (at least 1)
+        # This prevents NaN when a class has more positives than total_samples estimate
+        neg_counts = np.maximum(total_samples - safe_counts, 1.0)
+
+        # Add small epsilon to prevent division issues
         weights = neg_counts / (safe_counts + 1e-8)
+
         # Use sqrt to dampen extreme weights and prevent gradient explosion
-        weights = np.sqrt(weights)
+        weights = np.sqrt(np.maximum(weights, 0.0))  # Ensure non-negative before sqrt
+
         # Clip to prevent extreme weights (max ~10x, not 100x)
         weights = np.clip(weights, 1.0, 10.0)
     elif method == 'inverse':
@@ -693,16 +702,24 @@ def compute_class_weights(
         weights = 1.0 / np.sqrt(safe_counts + 1)
     elif method == 'effective_num':
         # Effective number of samples
-        effective_num = 1.0 - np.power(beta, safe_counts)
-        weights = (1.0 - beta) / (effective_num + 1e-8)
+        # Clip beta^n to prevent underflow for very large counts
+        beta_power = np.power(beta, np.minimum(safe_counts, 100000))
+        effective_num = 1.0 - beta_power
+        # Ensure effective_num is never zero
+        effective_num = np.maximum(effective_num, 1e-10)
+        weights = (1.0 - beta) / effective_num
         # Normalize only over classes that have positives
         if has_positives.any():
             weights_mean = weights[has_positives].mean()
-            weights = weights / (weights_mean + 1e-8)
+            if weights_mean > 0:
+                weights = weights / weights_mean
     else:
         weights = np.ones_like(class_counts, dtype=np.float32)
 
     # Set weight to 1.0 for classes with no positives (neutral, won't affect loss)
     weights = np.where(has_positives, weights, 1.0)
+
+    # Final safety check: replace any NaN or Inf with 1.0
+    weights = np.where(np.isfinite(weights), weights, 1.0)
 
     return torch.tensor(weights, dtype=torch.float32)

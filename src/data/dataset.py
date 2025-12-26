@@ -27,6 +27,7 @@ from .preprocessing import (
     MissingDataHandler,
     BodyPartMapper
 )
+from ..features import CombinedFeatureExtractor
 
 
 def flatten_behaviors_config(behaviors: Optional[Union[Dict[str, List[str]], List[str]]]):
@@ -106,7 +107,10 @@ class MABeDataset(Dataset):
         augment: bool = False,
         is_train: bool = True,
         tracking_cache_size: int = 4,
-        annotation_cache_size: int = 8
+        annotation_cache_size: int = 8,
+        # Engineered feature settings
+        use_engineered_features: bool = False,
+        feature_config: Optional[Dict] = None
     ):
         """
         Args:
@@ -122,6 +126,8 @@ class MABeDataset(Dataset):
             is_train: Whether this is training data
             tracking_cache_size: Max number of videos to keep cached for tracking data
             annotation_cache_size: Max number of videos to cache annotations for
+            use_engineered_features: Whether to compute engineered features
+            feature_config: Configuration dict for feature extraction
         """
         self.tracking_dir = Path(tracking_dir)
         self.annotation_dir = Path(annotation_dir) if annotation_dir else None
@@ -133,12 +139,29 @@ class MABeDataset(Dataset):
         self.is_train = is_train
         self.tracking_cache_size = max(1, tracking_cache_size)
         self.annotation_cache_size = max(1, annotation_cache_size)
+        self.use_engineered_features = use_engineered_features
+        self.feature_config = feature_config or {}
 
         # Initialize preprocessors
         self.coord_normalizer = CoordinateNormalizer()
         self.temporal_resampler = TemporalResampler(target_fps)
         self.missing_handler = MissingDataHandler()
         self.bodypart_mapper = BodyPartMapper(use_core_only=False)
+
+        # Initialize feature extractor if enabled
+        self.feature_extractor: Optional[CombinedFeatureExtractor] = None
+        if self.use_engineered_features:
+            self.feature_extractor = CombinedFeatureExtractor(
+                body_parts=self.bodypart_mapper.target_parts,
+                fps=target_fps,
+                use_raw_coords=self.feature_config.get('use_raw_coords', True),
+                use_single_mouse_features=self.feature_config.get('use_single_mouse', True),
+                use_pairwise_features=self.feature_config.get('use_pairwise', True),
+                use_temporal_features=self.feature_config.get('use_temporal', True),
+                temporal_windows=self.feature_config.get('temporal_windows', [5, 15, 30, 60]),
+                single_mouse_config=self.feature_config.get('single_mouse', {}),
+                pairwise_config=self.feature_config.get('pair', {})
+            )
 
         # In-memory caches to reduce parquet read overhead
         self._tracking_cache: OrderedDict = OrderedDict()
@@ -365,12 +388,22 @@ class MABeDataset(Dataset):
         agent_window = self._get_window(agent_coords, start_frame, end_frame)
         target_window = self._get_window(target_coords, start_frame, end_frame)
 
-        # Concatenate agent and target features
-        # Shape: (window_size, n_features)
-        features = np.concatenate([
-            agent_window.reshape(self.window_size, -1),
-            target_window.reshape(self.window_size, -1)
-        ], axis=-1)
+        # Extract features
+        if self.feature_extractor is not None:
+            # Use engineered features
+            features, _ = self.feature_extractor.extract_features(
+                agent_window,
+                target_window,
+                include_temporal=self.feature_config.get('use_temporal', True)
+            )
+        else:
+            # Fallback to raw coordinates only
+            # Concatenate agent and target features
+            # Shape: (window_size, n_features)
+            features = np.concatenate([
+                agent_window.reshape(self.window_size, -1),
+                target_window.reshape(self.window_size, -1)
+            ], axis=-1)
 
         # Create validity mask
         agent_valid_window = self._get_window(agent_valid.astype(np.float32), start_frame, end_frame)
@@ -620,12 +653,20 @@ class MABeDataModule(pl.LightningDataModule):
         target_fps: float = 30.0,
         val_split: float = 0.2,
         test_split: float = 0.1,
+        enable_test_split: bool = True,
         stratify_by_lab: bool = True,
         prefetch_factor: int = 4,
         tracking_cache_size: int = 4,
         annotation_cache_size: int = 8,
         use_precomputed: bool = False,
-        precomputed_dir: Optional[Union[str, Path]] = None
+        precomputed_dir: Optional[Union[str, Path]] = None,
+        # Oversampling settings for rare behaviors
+        oversample_rare: bool = False,
+        rare_behaviors: Optional[List[str]] = None,
+        oversample_factor: int = 10,
+        # Engineered feature settings
+        use_engineered_features: bool = False,
+        feature_config: Optional[Dict] = None
     ):
         super().__init__()
         self.data_dir = Path(data_dir)
@@ -637,12 +678,20 @@ class MABeDataModule(pl.LightningDataModule):
         self.target_fps = target_fps
         self.val_split = val_split
         self.test_split = test_split
+        self.enable_test_split = enable_test_split
         self.stratify_by_lab = stratify_by_lab
         self.prefetch_factor = prefetch_factor
         self.tracking_cache_size = tracking_cache_size
         self.annotation_cache_size = annotation_cache_size
         self.use_precomputed = use_precomputed
         self.precomputed_dir = Path(precomputed_dir) if precomputed_dir else None
+        # Oversampling settings
+        self.oversample_rare = oversample_rare
+        self.rare_behaviors = rare_behaviors or ['submit', 'chaseattack']
+        self.oversample_factor = oversample_factor
+        # Engineered feature settings
+        self.use_engineered_features = use_engineered_features
+        self.feature_config = feature_config or {}
 
         self.train_dataset = None
         self.val_dataset = None
@@ -681,14 +730,17 @@ class MABeDataModule(pl.LightningDataModule):
                         self.train_dataset = PrecomputedWindowDataset(
                             root=self.precomputed_dir,
                             split='train',
-                            apply_augment=True
+                            apply_augment=True,
+                            oversample_rare=self.oversample_rare,
+                            rare_behaviors=self.rare_behaviors,
+                            oversample_factor=self.oversample_factor
                         )
                         self.val_dataset = PrecomputedWindowDataset(
                             root=self.precomputed_dir,
                             split='val',
                             apply_augment=False
                         )
-                        if pretest_manifest.exists():
+                        if self.enable_test_split and self.test_split > 0 and pretest_manifest.exists():
                             self.test_dataset = PrecomputedWindowDataset(
                                 root=self.precomputed_dir,
                                 split='test',
@@ -704,10 +756,7 @@ class MABeDataModule(pl.LightningDataModule):
 
             # Reuse cached split when available to keep consistency across stages
             if self._train_split_df is None:
-                if self.stratify_by_lab:
-                    train_split, val_split, test_split = self._stratified_split_three(train_df)
-                else:
-                    train_split, val_split, test_split = self._random_split_three(train_df)
+                train_split, val_split, test_split = self._build_splits(train_df)
                 self._train_split_df, self._val_split_df, self._test_split_df = train_split, val_split, test_split
             else:
                 train_split, val_split, test_split = self._train_split_df, self._val_split_df, self._test_split_df
@@ -723,7 +772,9 @@ class MABeDataModule(pl.LightningDataModule):
                 augment=True,
                 is_train=True,
                 tracking_cache_size=self.tracking_cache_size,
-                annotation_cache_size=self.annotation_cache_size
+                annotation_cache_size=self.annotation_cache_size,
+                use_engineered_features=self.use_engineered_features,
+                feature_config=self.feature_config
             )
 
             self.val_dataset = MABeDataset(
@@ -737,28 +788,38 @@ class MABeDataModule(pl.LightningDataModule):
                 augment=False,
                 is_train=False,
                 tracking_cache_size=self.tracking_cache_size,
-                annotation_cache_size=self.annotation_cache_size
+                annotation_cache_size=self.annotation_cache_size,
+                use_engineered_features=self.use_engineered_features,
+                feature_config=self.feature_config
             )
 
-            self.test_dataset = MABeDataset(
-                metadata_df=test_split,
-                tracking_dir=self.data_dir / 'train_tracking',
-                annotation_dir=self.data_dir / 'train_annotation',
-                behaviors=self.behaviors or self.train_dataset.behaviors,
-                window_size=self.window_size,
-                stride=self.window_size,  # No overlap for held-out test
-                target_fps=self.target_fps,
-                augment=False,
-                is_train=False,
-                tracking_cache_size=self.tracking_cache_size,
-                annotation_cache_size=self.annotation_cache_size
-            )
+            self.test_dataset = None
+            if test_split is not None and len(test_split) > 0:
+                self.test_dataset = MABeDataset(
+                    metadata_df=test_split,
+                    tracking_dir=self.data_dir / 'train_tracking',
+                    annotation_dir=self.data_dir / 'train_annotation',
+                    behaviors=self.behaviors or self.train_dataset.behaviors,
+                    window_size=self.window_size,
+                    stride=self.window_size,  # No overlap for held-out test
+                    target_fps=self.target_fps,
+                    augment=False,
+                    is_train=False,
+                    tracking_cache_size=self.tracking_cache_size,
+                    annotation_cache_size=self.annotation_cache_size,
+                    use_engineered_features=self.use_engineered_features,
+                    feature_config=self.feature_config
+                )
 
             # Update behaviors from training data
             if self.behaviors is None:
                 self.behaviors = self.train_dataset.behaviors
 
         if stage == 'test' or stage is None:
+            if not self.enable_test_split or self.test_split <= 0:
+                self.test_dataset = None
+                return
+
             if use_precomputed and self.precomputed_dir:
                 pretest_manifest = self.precomputed_dir / 'test' / 'manifest.json'
                 if pretest_manifest.exists():
@@ -777,10 +838,7 @@ class MABeDataModule(pl.LightningDataModule):
             if self._test_split_df is None and train_csv.exists():
                 # Build splits lazily when only stage='test' is requested
                 train_df = pd.read_csv(train_csv)
-                if self.stratify_by_lab:
-                    train_split, val_split, test_split = self._stratified_split_three(train_df)
-                else:
-                    train_split, val_split, test_split = self._random_split_three(train_df)
+                train_split, val_split, test_split = self._build_splits(train_df)
                 self._train_split_df, self._val_split_df, self._test_split_df = train_split, val_split, test_split
                 # Preserve behaviors
                 if self.behaviors is None and train_split is not None:
@@ -795,11 +853,13 @@ class MABeDataModule(pl.LightningDataModule):
                         augment=False,
                         is_train=True,
                         tracking_cache_size=self.tracking_cache_size,
-                        annotation_cache_size=self.annotation_cache_size
+                        annotation_cache_size=self.annotation_cache_size,
+                        use_engineered_features=self.use_engineered_features,
+                        feature_config=self.feature_config
                     )
                     self.behaviors = tmp_dataset.behaviors
 
-            if self.test_dataset is None and self._test_split_df is not None:
+            if self.test_dataset is None and self._test_split_df is not None and len(self._test_split_df) > 0:
                 self.test_dataset = MABeDataset(
                     metadata_df=self._test_split_df,
                     tracking_dir=self.data_dir / 'train_tracking',
@@ -811,7 +871,9 @@ class MABeDataModule(pl.LightningDataModule):
                     augment=False,
                     is_train=False,
                     tracking_cache_size=self.tracking_cache_size,
-                    annotation_cache_size=self.annotation_cache_size
+                    annotation_cache_size=self.annotation_cache_size,
+                    use_engineered_features=self.use_engineered_features,
+                    feature_config=self.feature_config
                 )
 
     def _stratified_split_three(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -851,6 +913,57 @@ class MABeDataModule(pl.LightningDataModule):
         test_df = df.iloc[indices[n_val:n_val + n_test]]
         train_df = df.iloc[indices[n_val + n_test:]]
         return train_df, val_df, test_df
+
+    def _stratified_split_two(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Split data into train/val stratified by lab_id (no held-out test)."""
+        train_dfs = []
+        val_dfs = []
+
+        for lab_id in df['lab_id'].unique():
+            lab_df = df[df['lab_id'] == lab_id]
+            n = len(lab_df)
+            n_val = max(1, int(n * self.val_split))
+            if n_val >= n and n > 1:
+                n_val = n - 1  # leave at least one sample for training when possible
+            indices = np.random.permutation(n)
+            val_idx = indices[:n_val]
+            train_idx = indices[n_val:]
+            if n_val > 0:
+                val_dfs.append(lab_df.iloc[val_idx])
+            if len(train_idx) > 0:
+                train_dfs.append(lab_df.iloc[train_idx])
+
+        val_df = pd.concat(val_dfs) if val_dfs else pd.DataFrame(columns=df.columns)
+        train_df = pd.concat(train_dfs) if train_dfs else pd.DataFrame(columns=df.columns)
+        return train_df, val_df
+
+    def _random_split_two(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Randomly split data into train/val without creating a held-out test set."""
+        n = len(df)
+        n_val = max(1, int(n * self.val_split))
+        if n_val >= n and n > 1:
+            n_val = n - 1
+        indices = np.random.permutation(n)
+        val_df = df.iloc[indices[:n_val]]
+        train_df = df.iloc[indices[n_val:]]
+        return train_df, val_df
+
+    def _build_splits(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[pd.DataFrame]]:
+        """
+        Build train/val (and optionally test) splits based on configuration.
+        Returns (train_df, val_df, test_df_or_None).
+        """
+        test_enabled = self.enable_test_split and self.test_split > 0
+        if self.stratify_by_lab:
+            if test_enabled:
+                return self._stratified_split_three(df)
+            train_split, val_split = self._stratified_split_two(df)
+            return train_split, val_split, None
+
+        if test_enabled:
+            return self._random_split_three(df)
+        train_split, val_split = self._random_split_two(df)
+        return train_split, val_split, None
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(
@@ -909,18 +1022,35 @@ class MABeDataModule(pl.LightningDataModule):
 class PrecomputedWindowDataset(Dataset):
     """
     Dataset for loading precomputed windows stored as sharded torch files.
+
+    Supports oversampling of rare behaviors to address class imbalance.
     """
 
     def __init__(
         self,
         root: Union[str, Path],
         split: str = 'train',
-        apply_augment: bool = False
+        apply_augment: bool = False,
+        oversample_rare: bool = False,
+        rare_behaviors: Optional[List[str]] = None,
+        oversample_factor: int = 10
     ):
+        """
+        Args:
+            root: Root directory containing precomputed shards
+            split: Data split ('train', 'val', 'test')
+            apply_augment: Whether to apply data augmentation
+            oversample_rare: Whether to oversample windows containing rare behaviors
+            rare_behaviors: List of behavior names to oversample (default: submit, chaseattack)
+            oversample_factor: How many times to repeat rare behavior windows
+        """
         super().__init__()
         self.root = Path(root)
         self.split = split
         self.apply_augment = apply_augment
+        self.oversample_rare = oversample_rare and split == 'train'  # Only oversample training
+        self.rare_behaviors = rare_behaviors or ['submit', 'chaseattack']
+        self.oversample_factor = oversample_factor
 
         manifest_path = self.root / split / 'manifest.json'
         if not manifest_path.exists():
@@ -948,21 +1078,87 @@ class PrecomputedWindowDataset(Dataset):
             shard_path = self.root / self.split / shard_info['path']
             shard = torch.load(shard_path, map_location='cpu')
             self.shards_data.append(shard)
-        if self.shards_data:
-            total_samples = sum(s['num_samples'] for s in self.shards)
-            print(f"[data] Loaded {len(self.shards_data)} precomputed shards for {split} into memory ({total_samples} samples).")
 
+        # Build cumulative counts for original indexing
         self._cum_counts = []
         total = 0
         for shard in self.shards:
             total += shard['num_samples']
             self._cum_counts.append(total)
 
+        self._base_length = self._cum_counts[-1] if self._cum_counts else 0
+
+        # Build oversampled index if enabled
+        self._oversampled_indices: Optional[List[int]] = None
+        if self.oversample_rare and self.shards_data:
+            self._build_oversampled_indices()
+
+        if self.shards_data:
+            total_samples = sum(s['num_samples'] for s in self.shards)
+            effective_samples = len(self)
+            if self._oversampled_indices:
+                print(f"[data] Loaded {len(self.shards_data)} precomputed shards for {split} "
+                      f"({total_samples} samples, {effective_samples} after oversampling).")
+            else:
+                print(f"[data] Loaded {len(self.shards_data)} precomputed shards for {split} into memory ({total_samples} samples).")
+
+    def _build_oversampled_indices(self):
+        """Build expanded index list that includes duplicates for rare behavior samples."""
+        # Find indices of rare behaviors
+        rare_behavior_indices = set()
+        for behavior_name in self.rare_behaviors:
+            if behavior_name in self.behaviors:
+                rare_behavior_indices.add(self.behaviors.index(behavior_name))
+
+        if not rare_behavior_indices:
+            print(f"[data] Warning: No rare behaviors found in {self.behaviors}")
+            return
+
+        # Build expanded index list
+        indices = []
+        rare_count = 0
+        normal_count = 0
+
+        for global_idx in range(self._base_length):
+            shard_idx, local_idx = self._locate_shard_base(global_idx)
+            shard = self.shards_data[shard_idx]
+            labels = shard['labels'][local_idx]
+
+            # Check if this window contains any rare behavior
+            has_rare = False
+            for behavior_idx in rare_behavior_indices:
+                if labels[:, behavior_idx].sum() > 0:  # Has positive frames for this behavior
+                    has_rare = True
+                    break
+
+            if has_rare:
+                # Add multiple copies for rare behavior windows
+                for _ in range(self.oversample_factor):
+                    indices.append(global_idx)
+                rare_count += 1
+            else:
+                indices.append(global_idx)
+                normal_count += 1
+
+        self._oversampled_indices = indices
+        print(f"[data] Oversampling: {rare_count} rare windows x{self.oversample_factor}, "
+              f"{normal_count} normal windows. Total: {len(indices)}")
+
     def __len__(self) -> int:
-        return self._cum_counts[-1] if self._cum_counts else 0
+        if self._oversampled_indices is not None:
+            return len(self._oversampled_indices)
+        return self._base_length
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        shard_idx, local_idx = self._locate_shard(idx)
+        # Map through oversampled indices if enabled
+        if self._oversampled_indices is not None:
+            if idx < 0 or idx >= len(self._oversampled_indices):
+                raise IndexError(idx)
+            actual_idx = self._oversampled_indices[idx]
+        else:
+            actual_idx = idx
+
+        shard_idx, local_idx = self._locate_shard_base(actual_idx)
         shard = self._load_shard(shard_idx)
 
         features = shard['features'][local_idx].float()
@@ -983,14 +1179,24 @@ class PrecomputedWindowDataset(Dataset):
             'start_frame': metadata['start_frame']
         }
 
-    def _locate_shard(self, idx: int) -> Tuple[int, int]:
-        if idx < 0 or idx >= len(self):
+    def _locate_shard_base(self, idx: int) -> Tuple[int, int]:
+        """Locate shard and local index for a base (non-oversampled) index."""
+        if idx < 0 or idx >= self._base_length:
             raise IndexError(idx)
         for i, end in enumerate(self._cum_counts):
             if idx < end:
                 start = 0 if i == 0 else self._cum_counts[i - 1]
                 return i, idx - start
         raise IndexError(idx)
+
+    def _locate_shard(self, idx: int) -> Tuple[int, int]:
+        """Locate shard for external index (handles oversampling)."""
+        if self._oversampled_indices is not None:
+            if idx < 0 or idx >= len(self._oversampled_indices):
+                raise IndexError(idx)
+            actual_idx = self._oversampled_indices[idx]
+            return self._locate_shard_base(actual_idx)
+        return self._locate_shard_base(idx)
 
     def _load_shard(self, shard_idx: int) -> Dict[str, Any]:
         return self.shards_data[shard_idx]
