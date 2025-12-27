@@ -84,6 +84,8 @@ class TCNEncoder(nn.Module):
     ):
         super().__init__()
 
+        # Input normalization - critical for preventing float16 overflow
+        self.input_norm = nn.BatchNorm1d(input_dim)
         self.input_proj = nn.Conv1d(input_dim, channels[0], 1)
 
         layers = []
@@ -113,6 +115,7 @@ class TCNEncoder(nn.Module):
             (batch, seq_len, output_dim)
         """
         x = x.transpose(1, 2)  # (batch, input_dim, seq_len)
+        x = self.input_norm(x)  # Normalize input features
         x = self.input_proj(x)
 
         for layer in self.layers:

@@ -248,6 +248,10 @@ class MSTCN(nn.Module):
         self.num_classes = num_classes
         self.num_stages = num_stages
 
+        # Input normalization layer - critical for preventing float16 overflow
+        # BatchNorm normalizes features to zero mean and unit variance
+        self.input_norm = nn.BatchNorm1d(input_dim)
+
         # First stage: process input features
         self.stage1 = SingleStageTCN(
             in_channels=input_dim,
@@ -289,6 +293,10 @@ class MSTCN(nn.Module):
         """
         # Convert from (batch, seq_len, features) to (batch, features, seq_len)
         x = x.transpose(1, 2)
+
+        # Apply input normalization - critical for preventing float16 overflow
+        # BatchNorm1d expects (batch, features, seq_len) which we now have
+        x = self.input_norm(x)
 
         if mask is not None:
             mask = mask.unsqueeze(1)  # (batch, 1, seq_len)

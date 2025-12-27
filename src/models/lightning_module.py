@@ -155,6 +155,8 @@ class BehaviorRecognitionModule(pl.LightningModule):
         labels = batch['labels']
         mask = batch.get('valid_mask', None)
 
+        # Note: Features are standardized during precomputation (precompute_windows.py)
+
         if self.model_name == 'mstcn':
             predictions, stage_outputs = self.model(features, mask)
             loss, loss_dict = self.criterion(predictions, stage_outputs, labels, mask)
@@ -183,6 +185,8 @@ class BehaviorRecognitionModule(pl.LightningModule):
         features = batch['features']
         labels = batch['labels']
         mask = batch.get('valid_mask', None)
+
+        # Note: NaN/Inf sanitization is done during precomputation
 
         if self.model_name == 'mstcn':
             predictions, stage_outputs = self.model(features, mask)

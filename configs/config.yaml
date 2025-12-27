@@ -140,7 +140,7 @@ model:
   mstcn:
     num_stages: 4
     num_layers: 10
-    num_f_maps: 128  # Increased from 64 to use more GPU
+    num_f_maps: 64  # Reduced to fit in GPU memory
     kernel_size: 3
     dropout: 0.5
 
@@ -155,19 +155,19 @@ model:
 
 # Training settings
 training:
-  batch_size: 256  # Larger batch for 32GB VRAM + bigger model
-  num_workers: 2  # Small number of workers (pin_memory disabled on Windows)
+  batch_size: 256  # Reduced to fit in GPU memory
+  num_workers: 0  # Disabled to avoid Windows multiprocessing issues
   max_epochs: 1000
-  learning_rate: 0.001  # Scaled for batch size 256
-  weight_decay: 0.0002
-  prefetch_factor: 4  # Prefetch batches per worker
+  learning_rate: 0.0005  # Adjusted for batch size
+  weight_decay: 0.0001
+  prefetch_factor: 2
   # Note: Mixed precision (16-mixed) is enabled by default in train.py
 
   # Learning rate scheduler
   scheduler:
     name: cosine
-    warmup_epochs: 15  # Warmup for larger batch
-    min_lr: 0.00005
+    warmup_epochs: 10  # Warmup epochs
+    min_lr: 0.00001
 
   # Loss weights
   loss:
@@ -176,11 +176,11 @@ training:
     boundary_weight: 0.0
 
   # Class imbalance handling
-  # Use 'none' with focal loss instead - more stable than pos_weight for extreme imbalance
-  class_weighting: pos_neg_ratio  # Options: inverse, effective_num, pos_neg_ratio, none
+  # Use focal loss alone - combining with pos_weight causes NaN
+  class_weighting: none  # Disabled - focal loss handles imbalance
   effective_num_beta: 0.9999
-  use_focal_loss: true  # Use focal loss to handle class imbalance without pos_weight
-  focal_gamma: 1.5  # Focus on hard examples
+  use_focal_loss: true  # Focal loss handles class imbalance
+  focal_gamma: 2.0  # Standard focal loss gamma
 
   # Early stopping
   early_stopping:

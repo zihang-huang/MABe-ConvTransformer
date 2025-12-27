@@ -1202,6 +1202,9 @@ class PrecomputedWindowDataset(Dataset):
         valid_mask = shard['valid_mask'][local_idx].float()
         metadata = shard['metadata'][local_idx]
 
+        # Note: NaN/Inf sanitization is done during precomputation (precompute_windows.py)
+        # to avoid CPU overhead during training
+
         if self.apply_augment:
             features, labels = augment_tensors(features, labels)
 
