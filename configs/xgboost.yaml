@@ -1,0 +1,126 @@
+# XGBoost baseline configuration using precomputed window features.
+
+paths:
+  data_dir: ./kaggle/input/MABe-mouse-behavior-detection
+  train_tracking: ${paths.data_dir}/train_tracking
+  train_annotation: ${paths.data_dir}/train_annotation
+  test_tracking: ${paths.data_dir}/test_tracking
+  train_csv: ${paths.data_dir}/train.csv
+  test_csv: ${paths.data_dir}/test.csv
+  output_dir: ./outputs
+  checkpoint_dir: ${paths.output_dir}/checkpoints
+
+data:
+  target_fps: 30
+  window_size: 512
+  stride: 512
+  val_split: 0.2
+  test_split: 0
+  enable_test_split: false
+  min_segment_duration: 5
+  tracking_cache_size: 2
+  annotation_cache_size: 4
+  use_precomputed: true
+  precomputed_dir: ${paths.data_dir}/precomputed
+  oversample_rare: false
+  shard_cache_size: 8
+
+behaviors:
+  self:
+    - biteobject
+    - climb
+    - dig
+    - exploreobject
+    - freeze
+    - genitalgroom
+    - huddle
+    - rear
+    - rest
+    - run
+    - selfgroom
+
+  pair:
+    - allogroom
+    - approach
+    - attack
+    - attemptmount
+    - avoid
+    - chase
+    - chaseattack
+    - defend
+    - disengage
+    - dominance
+    - dominancegroom
+    - dominancemount
+    - ejaculate
+    - escape
+    - flinch
+    - follow
+    - intromit
+    - mount
+    - reciprocalsniff
+    - shepherd
+    - sniff
+    - sniffbody
+    - sniffface
+    - sniffgenital
+    - submit
+    - tussle
+
+features:
+  use_engineered_features: true
+  use_raw_coords: true
+  use_single_mouse: true
+  use_pairwise: true
+  use_temporal: true
+  temporal_windows: [5, 15, 30, 60]
+  single_mouse:
+    position: true
+    velocity: true
+    acceleration: true
+    orientation: true
+    body_shape: true
+  pair:
+    relative_position: true
+    relative_velocity: true
+    distance: true
+    facing_angle: true
+
+model:
+  name: xgboost
+  # Tree model hyperparameters
+  xgboost_params:
+    n_estimators: 300
+    learning_rate: 0.08
+    max_depth: 6
+    min_child_weight: 5
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_lambda: 1.0
+    reg_alpha: 0.0
+  # Frame sampling controls to fit in memory
+  frame_subsample: 2
+  max_windows: 4000
+  max_windows_val: 800
+  threshold: 0.35
+
+training:
+  batch_size: 128
+  num_workers: 0
+  max_epochs: 1
+  learning_rate: 0.0005
+  weight_decay: 0.0001
+  prefetch_factor: 2
+
+evaluation:
+  threshold: 0.35
+  min_duration: 5
+  smoothing_kernel: 5
+  nms_threshold: 0.3
+  merge_gap: 5
+  segment_eval: true
+
+logging:
+  project: mabe-behavior
+  run_name: xgboost-baseline
+  use_wandb: false

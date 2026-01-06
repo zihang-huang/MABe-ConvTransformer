@@ -7,6 +7,7 @@ Usage:
     python scripts/train.py model=tcn_transformer training.batch_size=16
 """
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -36,6 +37,7 @@ add_safe_globals([np.core.multiarray.scalar])
 
 from src.data.dataset import MABeDataModule
 from src.models.lightning_module import BehaviorRecognitionModule, compute_class_weights
+from src.models.xgboost_model import train_xgboost_from_config
 
 # Use Tensor Cores on supported GPUs; trades some precision for speed.
 torch.set_float32_matmul_precision("high")
@@ -261,6 +263,19 @@ def main(config_path: str = None, ckpt_path: Optional[str] = None, **overrides):
     os.makedirs(config['paths']['output_dir'], exist_ok=True)
     os.makedirs(config['paths']['checkpoint_dir'], exist_ok=True)
 
+    # Shortcut for the XGBoost baseline (CPU tree-based model)
+    if config.get('model', {}).get('name') == 'xgboost':
+        print("[xgboost] Dispatching to XGBoost training pipeline...")
+        model, metrics = train_xgboost_from_config(config)
+        ckpt_path = Path(config['paths']['checkpoint_dir']) / 'xgboost_model.pkl'
+        model.save(ckpt_path)
+        metrics_path = Path(config['paths']['output_dir']) / 'xgboost_metrics.json'
+        with open(metrics_path, 'w') as f:
+            json.dump(metrics, f, indent=2)
+        print(f"[xgboost] Model saved to: {ckpt_path}")
+        print(f"[xgboost] Validation metrics: {metrics}")
+        return model, metrics
+
     # Initialize data module
     print("Initializing data module...")
 
@@ -397,7 +412,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, help='Override batch size')
     parser.add_argument('--epochs', type=int, help='Override max epochs')
     parser.add_argument('--lr', type=float, help='Override learning rate')
-    parser.add_argument('--model', type=str, choices=['mstcn', 'tcn_transformer'],
+    parser.add_argument('--model', type=str, choices=['mstcn', 'tcn_transformer', 'xgboost'],
                         help='Override model type')
     parser.add_argument('--use_precomputed', action='store_true',
                         help='Use precomputed shards instead of raw parquet')
