@@ -736,20 +736,12 @@ def main():
             columns=["row_id", "video_id", "agent_id", "target_id", "action", "start_frame", "stop_frame"],
         )
         submission_df.to_csv(submission_path, index=False)
-        print(f"[predictions] Submission-format predictions saved to {submission_path}")
 
-        # Compute Kaggle-compatible segment-level F1 metric
-        print("[kaggle] Computing Kaggle-compatible segment-level F1...")
         solution_df = build_solution_df(config, args.split)
         if solution_df is not None:
-            print(f"[kaggle] Solution has {len(solution_df)} rows, {solution_df['video_id'].nunique()} videos")
-            print(f"[kaggle] Submission has {len(submission_df)} rows, {submission_df['video_id'].nunique()} videos")
 
-            # Debug: show sample video_ids and their types
             sol_videos = solution_df["video_id"].unique()[:5]
             sub_videos = submission_df["video_id"].unique()[:5]
-            print(f"[kaggle] Solution video_ids (sample): {sol_videos} (type: {type(sol_videos[0]) if len(sol_videos) > 0 else 'N/A'})")
-            print(f"[kaggle] Submission video_ids (sample): {sub_videos} (type: {type(sub_videos[0]) if len(sub_videos) > 0 else 'N/A'})")
 
             # Ensure consistent types for video_id
             solution_df["video_id"] = solution_df["video_id"].astype(int)
@@ -758,13 +750,8 @@ def main():
             # Filter solution to videos that are in the submission
             submission_videos = set(submission_df["video_id"].unique())
             solution_df = solution_df[solution_df["video_id"].isin(submission_videos)]
-            print(f"[kaggle] After filtering: {len(solution_df)} solution rows for {len(submission_videos)} submission videos")
 
             if len(solution_df) > 0 and len(submission_df) > 0:
-                # Debug: show sample rows
-                print(f"[kaggle] Sample solution row: {solution_df.iloc[0].to_dict() if len(solution_df) > 0 else 'N/A'}")
-                print(f"[kaggle] Sample submission row: {submission_df.iloc[0].to_dict() if len(submission_df) > 0 else 'N/A'}")
-
                 try:
                     kaggle_f1 = mouse_fbeta(solution_df, submission_df, beta=1.0)
                     print(f"[kaggle] Segment-level F1 (Kaggle metric): {kaggle_f1:.4f}")
